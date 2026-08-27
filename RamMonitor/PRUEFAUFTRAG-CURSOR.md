@@ -138,69 +138,98 @@ Legende Priorität: **Muss** / **Kann** / **Nice**. Aufwand: S/M/L.
 
 ---
 
-## 7. Review-Ergebnis
+## 7. Review-Ergebnis (Cursor-Input)
 
-### 7.1 Gefundene Punkte / Risiken
+> **Bearbeitet als Senior System Engineer / PowerShell-Experte.** Die Skripte
+> wurden korrigiert und erweitert; Syntax mit PowerShell 7.4.6 geprüft
+> (`Parser::ParseFile` → 0 Fehler) und die Analyse gegen synthetische Testdaten
+> (2 Messtage sowie der Divergenz-Fall „hoher Commit / niedriger physischer
+> Bedarf") real durchlaufen lassen.
 
-_Schweregrad: Hoch = falsche Entscheidung möglich · Mittel = Genauigkeit/Robustheit · Niedrig = Kosmetik._
+### 7.1 Gefundene Fehler / Risiken
 
-| # | Datei : Zeile | Beschreibung | Schwere | Fix-Vorschlag |
-|---|---|---|---|---|
-| **B1** | `Analyze-Memory.ps1:157`, `Track-Memory.ps1:211` | „Auslagerung > 50 Seiten/s = Speichermangel" ist **zu grob**. `PageReadsPerSec` zählt auch normales Nachladen speichergemappter Dateien (EXE/DLL-Start, CAD-Datei öffnen) – auch **ohne** RAM-Mangel. Kann Fehlalarm auslösen. | Mittel | Nur als Mangel werten, wenn **gleichzeitig** wenig verfügbar (`AvailableGB` niedrig). Kennzahl `lowAvailSamples` existiert bereits (Zeile 130) – mit Auslagerung koppeln. |
-| **B2** | `Track-Memory.ps1:158`, `Analyze:174` | Summe der **Working Sets** über Prozesse **überzählt gemeinsame Seiten** (dieselbe DLL zählt in jedem Prozess). Per-App-Working-Set ist dadurch eher zu hoch. | Mittel | Für die Größen-Einschätzung **privaten Speicher** (`PrivateGB`) betonen; Working Set nur als Anhalt. In der Tabelle privat gleichwertig zeigen (ist erfasst). |
-| **B3** | `Analyze-Memory.ps1:146-147` | Empfehlung stützt sich **nur** auf Commit Charge. Der physisch real genutzte Speicher (`PhysicalInUseGB`, ohne Cache) fließt nicht ein – als Gegenprobe sinnvoll. | Mittel | Zweite Kennzahl bilden: `max(PhysicalInUse) − Cache` und Empfehlung als **Maximum aus beiden** Wegen wählen. |
-| **B4** | `Track-Memory.ps1:118-121` | Erste `Win32_PerfFormattedData_*`-Abfrage liefert für **PerSec-Werte** oft 0/unzuverlässig (Rate braucht zwei Snapshots). Betrifft nur den ersten Messpunkt. | Niedrig | Ersten Messpunkt verwerfen **oder** einmal „aufwärmen" (Doppelabfrage vor der Schleife). |
-| **B5** | `Track-Memory.ps1:121,123` | Der OS-abgeleitete Commit (Zeile 107) wird durch den Counter **überschrieben**. Beide sind gültig, aber die OS-Ableitung ist die stabilere Primärquelle. | Niedrig | OS-Ableitung als führend belassen; Counter nur für Verfügbar/Cache/Auslagerung nutzen (oder beide Spalten führen). |
-| **B6** | `Track-Memory.ps1:73,101` | `TotalVisibleMemorySize` **unterschätzt** den physischen RAM leicht (hardware-reservierter Speicher fehlt) – z. B. 63,8 statt 64 GB. Kosmetisch. | Niedrig | Für die reine Anzeige `Win32_ComputerSystem.TotalPhysicalMemory` (Bytes) verwenden; für „belegt/frei" bleibt die OS-Klasse richtig. |
-| **B7** | `Track-Memory.ps1:204-205` | Bei hartem Abbruch **während** des Schreibens kann die letzte CSV-Zeile unvollständig sein. `Import-Csv` verkraftet das meist (verwirft die Zeile). | Niedrig | Optional: Konsistenzcheck in der Auswertung (Zeilen mit falscher Spaltenzahl überspringen). |
-| **B8** | `Track-Memory.ps1:154-159` | `Get-Process`-Eigenschaften können werfen, wenn ein Prozess **während** der Messung endet. Wegen `$ErrorActionPreference='Stop'` bräche die Messung ab – ist aber durch das try/catch der Schleife (197-219) abgefangen (Messpunkt geht verloren, Lauf läuft weiter). | Niedrig | Zugriff je Prozess kapseln **oder** `Get-CimInstance Win32_Process` (Snapshot) nutzen, um Datenverlust einzelner Punkte zu vermeiden. |
-| **B9** | `Track-Memory.ps1:204-205` | CSV wird mit **Komma-Trennzeichen** geschrieben. Doppelklick auf deutschem Excel (erwartet `;`) landet in **einer** Spalte. Für die Auswertung via Skript irrelevant. | Niedrig | Im README notieren („Excel: Daten → Text-in-Spalten") oder optional `-Delimiter ';'` (dann Import ebenso). |
-| **B10** | `Analyze-Memory.ps1:105-109` | Array-Index mit `[double]` (`[math]::Floor`) funktioniert per PS-Coercion, ist aber unsauber. Einzelmesspunkt wird korrekt behandelt (getestet gedanklich). | Niedrig | `[int]` casten: `$sorted[[int]$low]`. |
+_Schweregrad: Hoch = falsche Entscheidung möglich · Mittel = Genauigkeit/Robustheit · Niedrig = Kosmetik. Status: ✅ behoben · ⚠️ offen/dokumentiert._
 
-**Kein Fund mit Schwere „Hoch".** Die zwei entscheidungsrelevanten Punkte sind
-**B1** (Fehlalarm Auslagerung) und **B3** (Empfehlung nur auf Commit) – beide
-klein umzusetzen und in 7.3 als „Muss" priorisiert.
+| # | Datei : Stelle | Beschreibung | Schwere | Korrektur | Status |
+|---|---|---|---|---|---|
+| **F1** | `Track-Memory.ps1` · `Get-ProcessSample` | `Get-Process`-Eigenschaften (`WorkingSet64` etc.) können werfen, wenn sich ein Prozess **während** der Messung beendet – unter `$ErrorActionPreference='Stop'` wäre der Messpunkt verloren. | Mittel | `Get-Process -ErrorAction SilentlyContinue`; Speicher-Properties je Prozess **sofort in try/catch** in einen Snapshot (`WS`/`PV`) gelesen, beendete Prozesse werden still übersprungen. | ✅ |
+| **F2** | beide Skripte · alle CSV/HTML-Schreibvorgänge | UTF-8-Stabilität bei Pfaden mit Umlauten/Sonderzeichen auf PS 5.1 **und** 7. | Niedrig | Durchgängig `-Encoding UTF8` (Export-Csv) bzw. `Out-File -Encoding UTF8`; Rechnername/Pfad werden nicht mehr in Dateinamen-kritischer Weise zusammengesetzt (Tagesdatei-Schema). | ✅ |
+| **F3** | `Track-Memory.ps1` · `Get-SystemSample` | Performance-Counter `Win32_PerfFormattedData_PerfOS_Memory` kann fehlen / einzelne Werte (`PagesPerSec`, `PageReadsPerSec`) 0 oder null liefern (erster Sample: Rate noch nicht berechenbar). | Mittel | Gesamte Counter-Abfrage in `try/catch`; **je Property** `if ($null -ne …)`-Guard mit Fallback auf die OS-abgeleiteten Werte. Kein Abbruch, keine Nullref. | ✅ |
+| **F4** | `Analyze-Memory.ps1` · HTML/CSS | Dark-Mode-Kontrast der Tabelle „Größte Speicherverbraucher": Zeilentext auf hellem/alterniertem Grund schwer lesbar. | Mittel | Explizite `color:var(--fg)` auf `th,td`; Dark-Mode-Regel `td,th { color:#e2e8f0 }`; kontrastsichere Zebra-/Hover-Zeilen mit geringer Deckkraft. | ✅ |
+| **F5** | `Analyze-Memory.ps1` · Empfehlung | Empfehlung nur nach Commit → **Fehlkauf-Gefahr** durch reservierten, aber ungenutzten Speicher. | Hoch (Kosten) | **Zwei-Faktor-Logik**: Hochstufung auf die nächste Klasse nur, wenn `Commit_p95` **und** `WorkingSet_Max (physisch ohne Cache)` die Schwellen überschreiten (32→64: p95 > 25,6 GB **und** WS > 22 GB). Sicherheits-Override, falls Commit die Klasse komplett übersteigt. | ✅ |
+| **F6** | `Analyze-Memory.ps1` · Auslagerung | „> 50 Seiten/s = Mangel" ist zu grob (normales Nachladen löst Fehlalarm aus). | Mittel | Speicherdruck nur, wenn `PageReads > 50` **und** gleichzeitig `Available < max(1, 5% RAM)`. | ✅ |
+| **F7** | `Analyze-Memory.ps1` · Konfidenz | Bei sehr wenigen Messpunkten ist p99 faktisch = Max; Nutzer sah das nicht. | Mittel | Rotes Banner bei **< 60 Messpunkten oder < 1 h**, inkl. Hinweis „p99 ≈ Max bei wenigen Punkten". | ✅ |
+| **F8** | `Track-Memory.ps1` · Messschleife | Kein Festhalten, **welche Programme** beim höchsten Bedarf liefen. | Kann | **Peak-Snapshot**: bei neuem Commit-Höchstwert werden die **Top-5-Programme** (nach privatem Speicher) in die Spalte `PeakTop5` des Messpunkts geschrieben. | ✅ |
+| **F9** | `Analyze-Memory.ps1` · Perzentil | Array-Index mit `[double]` (Coercion) unsauber; Einzelmesspunkt. | Niedrig | `[int]`-Cast der Indizes; Einzel-/Leerfall explizit behandelt. | ✅ |
+| **F10** | `Track-Memory.ps1` · Zähler | Working-Set-**Summe** über Prozesse überzählt geteilte Seiten. | Mittel | In der Auswertung wird **privater Speicher** zur Leit-/Sortiergröße je Programm; Working Set nur als Anhalt gezeigt. | ✅ |
+| **R1** | `Track-Memory.ps1` · CSV-Delimiter | Deutsches Excel erwartet beim Doppelklick `;` → Spalten verrutschen (für die Skript-Auswertung irrelevant). | Niedrig | In README dokumentiert (Import über „Daten → Text-in-Spalten"). Optionaler `-Delimiter ';'` als möglicher Ausbau. | ⚠️ dokumentiert |
+| **R2** | `Track-Memory.ps1` · harter Abbruch | Letzte CSV-Zeile evtl. unvollständig. `Import-Csv` verwirft sie i. d. R. | Niedrig | Beobachten; optionaler Zeilen-Konsistenzcheck als Ausbau. | ⚠️ offen |
+
+**Kein verbleibender Fund mit Schwere „Hoch".** Der kostenrelevanteste Punkt
+(**F5**, Fehlkauf durch reine Commit-Betrachtung) ist behoben.
 
 ### 7.2 Bewertung der Methodik
 
-- **Commit Charge als Leitgröße: richtig.** Sie ist die einzige RAM-größen-
-  **unabhängige** Bedarfszahl und entspricht dem, was der Task-Manager als
-  „Zugesichert" zeigt. Die reine „belegt"-Anzeige wäre irreführend (Cache).
-- **Präzisierung:** Commit ist eine leichte **Obergrenze** des physischen
-  Bedarfs (nicht alles Zugesicherte ist gleichzeitig aktiv im RAM). Für die
-  Entscheidung ist das die **sichere Richtung** (lieber etwas großzügig).
-  Als Gegenprobe sollte zusätzlich `PhysicalInUse − Cache` betrachtet werden
-  (B3); die Empfehlung nimmt dann das Maximum beider Wege.
-- **„Was-wäre-wenn-16/32-GB"-Modell empfohlen:** Ein kleineres Gerät hat weniger
-  Cache. Faustregel: Ziel-Bedarf ≈ `Commit-p99` + kleiner Cache-Sockel
-  (~1–2 GB Betriebsreserve). Reicht die Kandidatengröße mit 20–25 % Luft, ist
-  sie komfortabel. Genau das leistet die 80-%-Regel bereits – gut.
-- **Aussagekraft = Messdauer.** Eine belastbare Empfehlung braucht **echte
-  Lastphasen** (mehrere CAD-Projekte + Videokonferenz gleichzeitig) und
-  idealerweise mehrere Tage. Kurze Messungen unterschätzen den Spitzenbedarf.
-  Empfehlung: Konfidenz-Hinweis bei zu wenigen Messpunkten (7.3).
+- **Commit Charge als Leitgröße – richtig, aber als *Obergrenze* zu lesen.**
+  Commit ist die einzige RAM-größenunabhängige Bedarfszahl (entspricht „Zugesichert"
+  im Task-Manager). Sie beschreibt jedoch **reservierten**, nicht zwingend
+  **residenten** Speicher.
+- **Working-Set-Inflation auf dem 64-GB-Testgerät (zentral!).** Browser (Chrome,
+  Brave, Edge/`msedgewebview2`) und Electron-Apps (Teams, Slack, auch der
+  Cursor-Editor) belegen auf einem 64-GB-System **mehr** Speicher, als sie auf
+  einem 32-GB-System aktiv nutzen würden: Erst bei Knappheit greifen Memory
+  Pressure und Garbage Collection und geben Speicher zurück. Ein reiner
+  Commit-Vergleich vom 64-GB-Gerät **überschätzt** daher den Bedarf auf einem
+  kleineren Gerät. → Deshalb die **Zwei-Faktor-Empfehlung** (F5): Hochstufen nur,
+  wenn auch der **physisch belegte** Speicher (ohne Cache) hoch ist.
+- **p99 vs. p95.** p99 ist der konservative Dauer-Spitzenwert und gut für die
+  Ampel. Für die *Kaufschwelle* nutzt die neue Logik bewusst **p95** (robuster
+  gegen einzelne Ausreißer) – deckt sich mit der geforderten Schwelle
+  `Commit_p95 > 26 GB`. **Wichtig:** Bei < 60 Messpunkten liegen p95, p99 und Max
+  praktisch übereinander → dann ist die Aussage schwach (Konfidenz-Banner, F7).
+- **Cache-Verhalten.** Freier RAM wird als Datei-Cache genutzt (beschleunigt das
+  Laden großer CAD-Pläne) und lässt „belegt" hoch aussehen. Die Auswertung rechnet
+  den Cache heraus (`PhysicalInUse − Cache`) und plant zugleich ~20 % Reserve ein
+  (80-%-Regel), damit auf dem Zielgerät genug Cache übrig bleibt.
+- **Fazit:** Kernannahme bestätigt, aber um die physische Gegenprobe ergänzt –
+  dadurch **kaufmännisch belastbar** (verhindert sowohl Unter- als auch
+  Überdimensionierung).
 
-### 7.3 Empfohlene Umsetzung (priorisiert)
+### 7.3 Empfohlene fehlende Features
 
-| Prio | Punkt | Bezug | Aufwand |
-|---|---|---|---|
-| 1 | Auslagerung nur mit **wenig-verfügbar** koppeln | B1 | S |
-| 2 | Empfehlung = **max(Commit-Weg, PhysInUse−Cache-Weg)**; privaten Speicher betonen | B3, B2 | S |
-| 3 | **Tagesrotation** der CSV für Mehrtages-Messung | Feature | S |
-| 4 | **Spitzen-Snapshot** beim Commit-Höchstwert (volle Prozessliste) | Feature | S |
-| 5 | **Zeitreihen-Diagramm** (Inline-SVG) im HTML | Feature | M |
-| 6 | **Konfidenz-Hinweis** bei < N Messpunkten + Konsistenzcheck kaputter Zeilen | B7, Feature | S |
-| 7 | Kosmetik/Robustheit: B4, B5, B6, B10 | – | S |
+| Feature | Priorität | Nutzen | Aufwand | Anmerkung / Status |
+|---|---|---|---|---|
+| Tagesrotation der CSV (Mehrtages-Messung) | Muss | Belastbare Basis über mehrere Tage, begrenzter Datenverlust | S | ✅ umgesetzt |
+| Multi-Run-Aggregation + Aufschlüsselung pro Tag | Muss | Beantwortet „5 Tage fließen zusammen ein" | M | ✅ umgesetzt |
+| Peak-Snapshot (Top-5 / „Was lief beim Höchststand?") | Muss | Zentrales Argument in der Beschaffung | S | ✅ umgesetzt (Logger-Spalte + HTML-Rekonstruktion) |
+| Konfidenz-Warnung (< 60 Punkte / < 1 h) | Muss | Verhindert Fehlentscheidung aus Kurzmessung | S | ✅ umgesetzt |
+| Zwei-Faktor-Empfehlung (Commit **und** Working Set) | Muss | Verhindert Fehlkäufe | M | ✅ umgesetzt |
+| Zeitreihen-Diagramm (Inline-SVG) | Kann | Überzeugt Entscheider visuell | M | ✅ umgesetzt |
+| Mehrgeräte-Vergleich in **einem** Bericht | Kann | Test-PCs direkt gegenüberstellen | M | offen – aktuell je Rechner ein Bericht (`-Machine`) |
+| CSV-Zeilen-Konsistenzcheck (kaputte letzte Zeile) | Kann | Robuster nach hartem Abbruch | S | offen (R2) |
+| Schwellwert-Live-Warnung im Logger (Commit > X) | Nice | Frühwarnung während der Messung | S | offen |
+| Optionaler `;`-Delimiter für DE-Excel | Nice | Direktes Öffnen in Excel | S | offen (R1, dokumentiert) |
+| CPU-Last je Programm (Sekundärkennzahl) | Nice | Einordnung, außerhalb des RAM-Ziels | M | bewusst nicht umgesetzt |
 
-### 7.4 Sonstige Empfehlungen
+### 7.4 Sonstige Empfehlungen (Rollout im Elektroplanungs-Umfeld)
 
-- **Vor der echten Messung** einen 10-Minuten-Probelauf machen und Analyse
-  durchlaufen lassen (Abnahme Szenario 1), um Pfade/Rechte zu verifizieren.
-- **Messfenster gezielt wählen:** ein „schwerer" Tag mit maximaler Parallel-Last
-  bringt den aussagekräftigsten Spitzenwert.
-- **Beschaffungsempfehlung** immer mit der Bemerkung versehen, dass die Zahl den
-  **gemessenen** Arbeitsstil abbildet; künftige Software-Updates (Trimble/Office)
-  tendieren erfahrungsgemäß zu höherem Bedarf → nicht am absoluten Limit planen.
+- **ExecutionPolicy:** Die `.cmd`-Starter nutzen bereits
+  `-ExecutionPolicy Bypass -File …` (nur für diesen Aufruf, keine dauerhafte
+  Systemänderung). Auf per GPO gesperrten Firmen-PCs ggf. mit der IT abstimmen
+  (alternativ Skripte signieren) – als bekannter Punkt dokumentiert.
+- **Unter echter CAD-Last testen:** Aussagekräftig wird die Messung nur mit dem
+  realen Arbeitsmix – **Trimble Nova + Tinline Schema gleichzeitig**, dazu große
+  Projekte/Pläne öffnen, Teams-Videokonferenz, IP-Telefonie und die üblichen
+  Browser-Tabs. Bewusst auch Plan-Wechsel/Regenerieren provozieren (Speicherspitzen).
+- **Mehrere volle Arbeitstage** und – wenn möglich – **mehrere Arbeitsplatztypen**
+  (Planung vs. reine Office-Nutzung) messen; die Profile getrennt bewerten.
+- **Autostart** über die geplante Aufgabe (siehe README), damit die Messung
+  Neustarts übersteht und über Mitternacht (Tagesrotation) durchläuft.
+- **Reserve einplanen:** Die Empfehlung bildet den **heutigen** Arbeitsstil ab.
+  Trimble-/Office-Updates tendieren zu höherem Bedarf → nicht am absoluten Limit
+  kaufen; bei „Grenzwertig" die nächstgrößere Klasse wählen.
+- **Datenschutz:** Nur Speicherzahlen und Programmnamen werden erfasst – vor dem
+  Rollout dem Betriebsrat/DSB kurz transparent machen (steht so im README).
 
 ---
 

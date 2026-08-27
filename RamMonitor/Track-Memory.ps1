@@ -154,6 +154,9 @@ function Get-SystemSample {
         CacheGB          = $cacheGB
         PageReadsPerSec  = [math]::Round($pageReadsPerSec, 1)
         PagesPerSec      = [math]::Round($pagesPerSec, 1)
+        # Wird nur befuellt, wenn dieser Messpunkt einen neuen Commit-Hoechstwert
+        # bringt: dann stehen hier die Top-5-Programme (Spitzen-Snapshot).
+        PeakTop5         = ''
     }
 }
 
@@ -163,12 +166,28 @@ function Get-SystemSample {
 function Get-ProcessSample {
     param([string]$Timestamp)
 
-    $groups = Get-Process | Group-Object -Property ProcessName | ForEach-Object {
+    # Prozesse einmal snapshotten. Die Speicher-Eigenschaften werden SOFORT je
+    # Prozess in try/catch ausgelesen: Beendet sich ein Prozess waehrend der
+    # Messung, wirft der Zugriff sonst - wir ueberspringen ihn dann still,
+    # statt den Messpunkt zu verlieren.
+    $snap = foreach ($p in (Get-Process -ErrorAction SilentlyContinue)) {
+        try {
+            [pscustomobject]@{
+                Name = $p.ProcessName
+                WS   = [int64]$p.WorkingSet64
+                PV   = [int64]$p.PrivateMemorySize64
+            }
+        } catch {
+            # Prozess in der Zwischenzeit beendet -> ignorieren
+        }
+    }
+
+    $groups = $snap | Group-Object -Property Name | ForEach-Object {
         [pscustomobject]@{
             Name          = $_.Name
             InstanceCount = $_.Count
-            WorkingSetGB  = [math]::Round((($_.Group | Measure-Object WorkingSet64        -Sum).Sum) / 1GB, 3)
-            PrivateGB     = [math]::Round((($_.Group | Measure-Object PrivateMemorySize64 -Sum).Sum) / 1GB, 3)
+            WorkingSetGB  = [math]::Round((($_.Group | Measure-Object WS -Sum).Sum) / 1GB, 3)
+            PrivateGB     = [math]::Round((($_.Group | Measure-Object PV -Sum).Sum) / 1GB, 3)
         }
     }
 
@@ -205,6 +224,7 @@ function Get-ProcessSample {
 # Messschleife
 # ---------------------------------------------------------------------------
 $sampleNo = 0
+$peakCommit = -1.0   # hoechster bisher gesehener Commit-Wert (fuer Peak-Snapshot)
 try {
     while ((Get-Date) -lt $endTime) {
         $sampleNo++
@@ -220,6 +240,17 @@ try {
 
             $sys  = Get-SystemSample
             $proc = Get-ProcessSample -Timestamp $sys.Timestamp
+
+            # Peak-Snapshot: neuer Commit-Hoechstwert? -> Top-5-Programme (nach
+            # privatem Speicher) in die Spalte PeakTop5 des Messpunkts schreiben.
+            if ($sys.CommittedGB -gt $peakCommit) {
+                $peakCommit = $sys.CommittedGB
+                $sys.PeakTop5 = (($proc |
+                    Where-Object { $_.ProcessName -ne '(sonstige)' } |
+                    Sort-Object PrivateGB -Descending |
+                    Select-Object -First 5 |
+                    ForEach-Object { '{0} ({1} GB)' -f $_.ProcessName, $_.PrivateGB }) -join '; ')
+            }
 
             # Anhaengen; Export-Csv -Append schreibt die Kopfzeile nur beim
             # ersten Mal. Jede Messung wird sofort geschrieben (kein Datenverlust

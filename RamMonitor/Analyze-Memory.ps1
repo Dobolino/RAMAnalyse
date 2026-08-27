@@ -243,27 +243,62 @@ $verdicts = foreach ($s in $sizes) {
     $v = Get-Verdict -Need $needP99 -Size $s
     [pscustomobject]@{ Size=$s; Label=$v.Label; Color=$v.Color; Ratio=$v.Ratio }
 }
-# Empfehlung = kleinste Groesse, die mindestens "Ausreichend" (Ratio <= 0.90) ist
-$rec = ($verdicts | Where-Object { $_.Ratio -le 0.90 } | Select-Object -First 1)
-$recSize = if ($rec) { $rec.Size } else { 128 }
-$recColor = if ($rec) { $rec.Color } else { '#dc2626' }
+# ---------------------------------------------------------------------------
+# ZWEI-FAKTOR-EMPFEHLUNG (verhindert Fehlkaeufe durch reservierten, aber nicht
+# genutzten Commit-Speicher):
+#   Eine groessere RAM-Klasse wird nur empfohlen, wenn SOWOHL der zugesicherte
+#   Speicher (Commit p95) ALS AUCH der tatsaechlich physisch belegte Speicher
+#   (Working Set / physisch ohne Cache, Max) hoch sind. Grund: Ein 64-GB-
+#   Testsystem gewaehrt Anwendungen (v. a. Browser, Electron-Apps wie Teams)
+#   mehr Speicher, als sie auf einem 32-GB-System aktiv belegen wuerden - dort
+#   greifen frueher Memory Pressure / Garbage Collection. Commit allein wuerde
+#   daher tendenziell zu gross dimensionieren.
+# ---------------------------------------------------------------------------
+# Physische Schwellen je Klasse (Working-Set-Max muss diese ueberschreiten,
+# damit die Klasse allein durch Commit nicht "hochgezogen" wird):
+$wsGate32 = 12.0   # fuer 16 -> 32
+$wsGate64 = 22.0   # fuer 32 -> 64  (wie im Prüfauftrag gefordert)
+
+$recSize = 16
+# 16 -> 32
+if ($commitP95 -gt (16 * 0.8) -and $physNetMax -gt $wsGate32) { $recSize = 32 }
+# Sicherheits-Override: Commit passt physisch gar nicht mehr in 16 GB
+if ($commitP95 -gt 16) { $recSize = [math]::Max($recSize, 32) }
+# 32 -> 64: BEIDE Bedingungen noetig (Commit p95 > 25.6 UND Working Set > 22)
+if ($commitP95 -gt (32 * 0.8) -and $physNetMax -gt $wsGate64) { $recSize = 64 }
+# Sicherheits-Override: Commit uebersteigt 32 GB komplett -> 64 unvermeidbar
+if ($commitP95 -gt 32) { $recSize = [math]::Max($recSize, 64) }
+# darueber
+if ($commitP95 -gt 64) { $recSize = 128 }
+
+$recVerdict = Get-Verdict -Need $needP99 -Size $recSize
+$recColor = if ($recSize -le 64) { $recVerdict.Color } else { '#dc2626' }
+
+# Divergenz erkennen: Commit wuerde eine groessere Klasse nahelegen, physisch
+# ist der Bedarf aber deutlich kleiner (reservierter, ungenutzter Speicher).
+$commitOnlySize = 16
+if ($commitP95 -gt (16 * 0.8) -or $commitP95 -gt 16) { $commitOnlySize = 32 }
+if ($commitP95 -gt (32 * 0.8) -or $commitP95 -gt 32) { $commitOnlySize = 64 }
+if ($commitP95 -gt 64) { $commitOnlySize = 128 }
+$commitPhysGap = ($commitOnlySize -gt $recSize)
 
 # Klartext-Empfehlung
-$borderline = ($verdicts | Where-Object { $_.Label -eq 'Grenzwertig' } | Select-Object -First 1)
 $plain = "Empfohlen werden $recSize GB Arbeitsspeicher fuer diesen Arbeitsplatz-Typ."
-if ($rec -and $borderline -and $borderline.Size -lt $recSize) {
-    $plain += " Die naechstkleinere Groesse ($($borderline.Size) GB) wuerde im Alltag meist reichen, aber ohne Reserve fuer Spitzen - davon ist abzuraten, wenn kuenftig mehr Software/Projekte dazukommen."
-} elseif (-not $rec) {
+if ($commitPhysGap) {
+    $plain += " Der zugesicherte Speicher (Commit) wuerde rechnerisch $commitOnlySize GB nahelegen, doch physisch belegt wurden maximal nur $(Fmt $physNetMax) GB. Die Differenz ist reservierter, aber nicht aktiv genutzter Speicher (typisch fuer Browser/Teams auf einem grossen Testgeraet) - auf einem $recSize-GB-System faellt dieser Reservespeicher kleiner aus. $recSize GB genuegen daher voraussichtlich."
+} elseif ($recSize -ge 64 -and $commitP95 -gt 64) {
     $plain += " Der gemessene Bedarf uebersteigt 64 GB - hier ist mehr noetig."
+} else {
+    $plain += " Sowohl der zugesicherte als auch der physisch genutzte Speicher stuetzen diese Groesse."
 }
 
 # ---------------------------------------------------------------------------
 # Konfidenz (Aussagekraft der Messung)
 # ---------------------------------------------------------------------------
 $confLevel = 'gut'; $confText = ''
-if ($sampleCount -lt 30 -or $spanMinutes -lt 120) {
+if ($sampleCount -lt 60 -or $spanMinutes -lt 60) {
     $confLevel = 'gering'
-    $confText = "Diese Messung ist noch NICHT aussagekraeftig: nur $sampleCount Messpunkte ueber rund $spanText. Fuer eine belastbare Beschaffungsentscheidung bitte ueber mindestens einen vollen Arbeitstag messen - idealerweise mehrere Tage - und dabei die typische Last laufen lassen (mehrere CAD-Projekte, Videokonferenz, Browser gleichzeitig)."
+    $confText = "Diese Messung ist noch NICHT aussagekraeftig: nur $sampleCount Messpunkte ueber rund $spanText (Richtwert: mindestens 60 Messpunkte bzw. 1 Stunde). Bei so wenigen Messpunkten ist der p99-Wert praktisch identisch mit dem Maximum - ein einzelner Ausreisser bestimmt dann die Empfehlung. Fuer eine belastbare Beschaffungsentscheidung bitte ueber mindestens einen vollen Arbeitstag messen - idealerweise mehrere Tage - und dabei die typische Last laufen lassen (mehrere CAD-Projekte, Videokonferenz, Browser gleichzeitig)."
 } elseif ($spanMinutes -lt 480 -or $dayCount -lt 2) {
     $confLevel = 'mittel'
     $confText = "Grundlage: $sampleCount Messpunkte ueber rund $spanText an $dayCount Tag(en). Fuer mehr Sicherheit ueber mehrere volle Arbeitstage messen."
@@ -486,8 +521,14 @@ $html = @"
   .tile .hint { font-size:.78rem; color:var(--muted); margin-top:.25rem; }
   table { border-collapse:collapse; width:100%; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
   .tablewrap { overflow-x:auto; }
-  th,td { padding:.55rem .8rem; text-align:left; border-bottom:1px solid var(--line); font-size:.92rem; }
-  th { background:var(--th); }
+  th,td { padding:.55rem .8rem; text-align:left; border-bottom:1px solid var(--line); font-size:.92rem; color:var(--fg); }
+  th { background:var(--th); color:var(--fg); }
+  tbody tr:nth-child(even) td { background:rgba(148,163,184,.10); }
+  tbody tr:hover td { background:rgba(59,130,246,.14); }
+  @media (prefers-color-scheme: dark) {
+    td, th { color:#e2e8f0; }
+    tbody tr:nth-child(even) td { background:rgba(226,232,240,.06); }
+  }
   td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
   .sizetable td { vertical-align:middle; }
   .sz { font-weight:700; white-space:nowrap; }
@@ -522,6 +563,7 @@ $html = @"
 
   <h2>Reicht welche Groesse? <span class="info" title="Auslastung = benoetigter Speicher geteilt durch die Groesse. Unter 75% = viel Reserve, bis 90% = ok, bis ca. 100% = knapp, darueber = zu klein.">?</span></h2>
   <p class="muted">Bewertet anhand des <b>Dauerbedarfs (p99)</b> von <b>$(Fmt $needP99) GB</b>. Gruen = komfortabel, Gelb/Orange = knapp, Rot = zu klein. &#9733; = Empfehlung.</p>
+  <p class="muted"><b>Realitaets-Check:</b> Zugesichert (Commit p95) = $(Fmt $commitP95) GB &middot; tatsaechlich physisch belegt (max, ohne Cache) = $(Fmt $physNetMax) GB. Die Empfehlung stuft nur dann hoch, wenn <b>beide</b> Werte hoch sind - reservierter, aber ungenutzter Speicher fuehrt so nicht zu einem Fehlkauf.</p>
   <div class="tablewrap"><table class="sizetable">
     <thead><tr><th>Groesse</th><th>Auslastung</th><th class="num">%</th><th>Bewertung</th></tr></thead>
     <tbody>
@@ -574,6 +616,11 @@ $appRowsHtml
     <div class="gloss"><b>Auslagerung / Speicherdruck</b>Reicht der RAM nicht, schiebt Windows Daten auf die Festplatte (Auslagerungsdatei) - das bremst spuerbar. Wir zaehlen es nur als Problem, wenn gleichzeitig wenig RAM frei war. <i>Guter Wert:</i> 0.</div>
     <div class="gloss"><b>p99 / p95 / Median (Perzentil)</b>Sortiert man alle Messwerte, ist p99 der Wert, den 99% der Messungen nicht ueberschreiten (der Median 50%). <i>Warum wichtig:</i> p99 zeigt den praktischen Spitzenbedarf, ohne dass ein einzelner kurzer Ausreisser die Entscheidung bestimmt.</div>
     <div class="gloss"><b>Auslastung (%)</b>Benoetigter Speicher geteilt durch die RAM-Groesse. <i>Faustregel:</i> <span class="good">bis 75% komfortabel</span>, <span class="warn">bis ~100% knapp</span>, <span class="bad">darueber zu klein</span>. Etwas Reserve ist gut fuer den Datei-Cache und kuenftig groessere Programme.</div>
+  </details>
+  <details>
+    <summary>Warum "zugesichert" nicht gleich "benoetigt" ist (wichtig fuers Downsizing)</summary>
+    <div class="gloss"><b>Speicher-Inflation auf grossen Testsystemen</b>Auf einem 64-GB-Rechner "nehmen sich" viele Programme mehr Speicher, als sie eigentlich brauchen - besonders Browser (Chrome, Brave, Edge) und Electron-Apps (Teams, Slack, auch der Cursor-Editor). Sie geben Speicher erst zurueck, wenn er knapp wird (Memory Pressure / Garbage Collection). Auf einem 32-GB-System belegen dieselben Programme deshalb <b>weniger</b> - sie raeumen frueher auf.</div>
+    <div class="gloss"><b>Konsequenz fuer die Empfehlung</b>Der <b>zugesicherte Speicher (Commit)</b> ist deshalb eine <i>Obergrenze</i>, nicht der echte Bedarf. Dieses Werkzeug stuft eine groessere RAM-Klasse nur dann als noetig ein, wenn <b>zusaetzlich</b> der tatsaechlich physisch belegte Speicher (Working Set, ohne Cache) hoch ist. So wird nicht wegen reservierten, aber ungenutzten Speichers zu gross gekauft. Umgekehrt gilt: Zeigt sich echter Speicherdruck (Auslagerung bei knappem RAM), ist die Klasse wirklich zu klein.</div>
   </details>
 
   <footer>Erstellt am $(Get-Date -Format 'dd.MM.yyyy HH:mm') &middot; RAM-Monitor (Track-Memory.ps1 / Analyze-Memory.ps1)</footer>
