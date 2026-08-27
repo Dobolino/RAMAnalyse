@@ -8,10 +8,19 @@ setlocal
 cd /d "%~dp0"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Analyze-Memory.ps1" %*
 echo.
-echo Neuesten HTML-Bericht oeffnen ...
-for /f "delims=" %%f in ('dir /b /o-d "%~dp0Messdaten\Bericht_*.html" 2^>nul') do (
+echo Neueste Berichte oeffnen ...
+REM Einfacher Bericht (fuer Nicht-Techniker / IT-Verantwortlichen)
+for /f "delims=" %%f in ('dir /b /o-d "%~dp0Messdaten\Einfach-Bericht_*.html" 2^>nul') do (
+    start "" "%~dp0Messdaten\%%f"
+    goto :openit
+)
+:openit
+REM Ausfuehrlicher Bericht (fuer die IT)
+for /f "delims=" %%f in ('dir /b /o-d "%~dp0Messdaten\IT-Detailbericht_*.html" 2^>nul') do (
     start "" "%~dp0Messdaten\%%f"
     goto :done
 )
 :done
+echo.
+echo Fertig. Berichte + Zusammenfassung (CSV) liegen im Ordner "Messdaten".
 pause

@@ -119,6 +119,29 @@ Bedarfs) und eine Aufschlüsselung pro Messtag.
 > **gleichzeitig wenig RAM frei** war. Normales Nachladen von Programmdateien
 > (ohne Knappheit) löst also keinen Fehlalarm aus.
 
+### Zwei Berichte + Excel-Zusammenfassung
+
+Die Auswertung erzeugt standardmäßig **zwei Berichte** für unterschiedliche
+Zielgruppen plus eine CSV:
+
+| Datei | Für wen | Inhalt |
+|---|---|---|
+| **`Einfach-Bericht_*.html`** | IT-Verantwortlicher / normale Leser | Ein-Seiter: klare Empfehlung, grün/gelb/rot in Klartext, „Was bedeutet das?", keine Fachbegriffe |
+| **`IT-Detailbericht_*.html`** | IT / Technik | Alles: Ampel, Verlauf, Kennzahlen, pro Messtag, Höchststand, **technische Details** (alle Perzentile, Schwellenwerte, Methodik, Datenquellen) |
+| **`Zusammenfassung_*.csv`** | IT / Excel | Eine Zeile mit allen Kennzahlen zum Weiterverarbeiten |
+
+Beim Doppelklick auf `Auswertung-starten.cmd` öffnen sich **beide** Berichte
+automatisch. Gezielt nur einen erzeugen:
+
+```powershell
+.\Analyze-Memory.ps1 -Zielgruppe Einfach   # nur der einfache Ein-Seiter
+.\Analyze-Memory.ps1 -Zielgruppe IT        # nur Detailbericht + CSV
+.\Analyze-Memory.ps1 -Zielgruppe Beide     # Standard: alles
+```
+
+> Aus jedem HTML-Bericht wird per Browser **Drucken → „Als PDF speichern"** ein
+> PDF zum Verschicken – ganz ohne Zusatzsoftware.
+
 ---
 
 ## Manuelle Nutzung (PowerShell)

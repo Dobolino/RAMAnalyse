@@ -37,7 +37,9 @@ param(
     [string]$ProcessCsv,
     [string]$InputFolder,
     [string]$Machine,
-    [string]$OutputHtml
+    [string]$OutputHtml,
+    [ValidateSet('IT','Einfach','Beide')]
+    [string]$Zielgruppe = 'Beide'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -382,11 +384,8 @@ if ($confLevel -eq 'gering') { Write-Host (" ! {0}" -f $confText) -ForegroundCol
 Write-Host ""
 
 # ===========================================================================
-# HTML-Bericht
+# HTML-Berichte aufbauen (Detail fuer IT + einfacher Ein-Seiter)
 # ===========================================================================
-if ([string]::IsNullOrWhiteSpace($OutputHtml)) {
-    $OutputHtml = Join-Path $InputFolder ("Bericht_{0}.html" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
-}
 
 # --- Fragment: Konfidenz-Banner ---
 $confColor = switch ($confLevel) { 'gering' {'#dc2626'} 'mittel' {'#d97706'} default {'#16a34a'} }
@@ -626,12 +625,182 @@ $appRowsHtml
     <div class="gloss"><b>Konsequenz fuer die Empfehlung</b>Der <b>zugesicherte Speicher (Commit)</b> ist deshalb eine <i>Obergrenze</i>, nicht der echte Bedarf. Dieses Werkzeug stuft eine groessere RAM-Klasse nur dann als noetig ein, wenn <b>zusaetzlich</b> der tatsaechlich physisch belegte Speicher (Working Set, ohne Cache) hoch ist. So wird nicht wegen reservierten, aber ungenutzten Speichers zu gross gekauft. Umgekehrt gilt: Zeigt sich echter Speicherdruck (Auslagerung bei knappem RAM), ist die Klasse wirklich zu klein.</div>
   </details>
 
-  <footer>Erstellt am $(Get-Date -Format 'dd.MM.yyyy HH:mm') &middot; RAM-Monitor (Track-Memory.ps1 / Analyze-Memory.ps1)</footer>
+  <h2>Technische Details (fuer die IT)</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Kennzahl</th><th class="num">Wert</th><th>Erläuterung</th></tr></thead>
+    <tbody>
+      <tr><td>Commit Charge - Maximum</td><td class="num">$(Fmt $commitMax) GB</td><td>hoechster Einzelwert</td></tr>
+      <tr><td>Commit Charge - p99 / p95 / Median</td><td class="num">$(Fmt $commitP99) / $(Fmt $commitP95) / $(Fmt $commitP50) GB</td><td>Perzentile</td></tr>
+      <tr><td>Commit Charge - Mittelwert</td><td class="num">$(Fmt $commitAvg) GB</td><td>arithmetisches Mittel</td></tr>
+      <tr><td>Physisch belegt (inkl. Cache) - Max / Mittel</td><td class="num">$(Fmt $physMax) / $(Fmt $physAvg) GB</td><td>Total - FreePhysicalMemory</td></tr>
+      <tr><td>Physisch genutzt (ohne Cache) - Max / p99</td><td class="num">$(Fmt $physNetMax) / $(Fmt $physNetP99) GB</td><td>PhysicalInUse - CacheBytes</td></tr>
+      <tr><td>Verfuegbar - Minimum</td><td class="num">$(Fmt $availMin) GB</td><td>tiefster freier RAM</td></tr>
+      <tr><td>Speicherdruck-Messpunkte</td><td class="num">$pressureSamples</td><td>PageReads &gt; 50/s UND Verfuegbar &lt; $(Fmt $lowAvailGB) GB</td></tr>
+      <tr><td>Auslagerung - Max (PageReads/s)</td><td class="num">$(Fmt $pageMax)</td><td>harte Seitenfehler</td></tr>
+      <tr><td>Messpunkte / Dauer / Messtage</td><td class="num">$sampleCount / $spanText / $dayCount</td><td>Datenbasis</td></tr>
+    </tbody>
+  </table></div>
+  <details>
+    <summary>Methodik &amp; Schwellenwerte (nachvollziehbar)</summary>
+    <div class="gloss"><b>Leitgroesse</b>Commit Charge (zugesicherter Speicher), sprachunabhaengig aus Win32_OperatingSystem abgeleitet (TotalVirtualMemorySize - FreeVirtualMemory) und via Win32_PerfFormattedData_PerfOS_Memory gegengeprueft.</div>
+    <div class="gloss"><b>Ampel</b>Auslastung = Commit p95 / RAM-Groesse. Schwellen: &le;75% Komfortabel, &le;90% Ausreichend, &le;102% Grenzwertig, &gt;102% Zu klein.</div>
+    <div class="gloss"><b>Zwei-Faktor-Empfehlung</b>Hochstufung 16&rarr;32 nur bei Commit p95 &gt; 12,8 GB UND Working-Set-Max &gt; $(Fmt $wsGate32) GB; 32&rarr;64 nur bei Commit p95 &gt; 25,6 GB UND Working-Set-Max &gt; $(Fmt $wsGate64) GB. Sicherheits-Override, falls Commit die Klasse komplett uebersteigt.</div>
+    <div class="gloss"><b>Empfehlungs-Grundlage (dieser Lauf)</b>Commit p95 = $(Fmt $commitP95) GB, Working-Set-Max (ohne Cache) = $(Fmt $physNetMax) GB &rarr; Empfehlung $recSize GB. Commit-allein-Sicht: $commitOnlySize GB$(if($commitPhysGap){' (durch physische Gegenprobe reduziert)'}).</div>
+    <div class="gloss"><b>Speicherdruck</b>Nur gewertet, wenn PageReads &gt; 50/s UND gleichzeitig Verfuegbar &lt; $(Fmt $lowAvailGB) GB (5% des RAM bzw. min. 1 GB).</div>
+    <div class="gloss"><b>Datenquellen</b>Rechner $(HtmlEncode $selMachine); $($runs.Count) Datei(en)/Lauf(e); erzeugt mit Track-Memory.ps1 / Analyze-Memory.ps1.</div>
+  </details>
+
+  <footer>Erstellt am $(Get-Date -Format 'dd.MM.yyyy HH:mm') &middot; RAM-Monitor - Detailbericht (fuer die IT)</footer>
+</div>
+</body>
+</html>
+"@
+$htmlIT = $html
+
+# ===========================================================================
+# EINFACHER EIN-SEITER (fuer Nicht-Techniker / IT-Verantwortliche)
+# ===========================================================================
+function Simple-Label($lbl) {
+    switch ($lbl) {
+        'Komfortabel' { 'Reicht locker' }
+        'Ausreichend' { 'Reicht gut' }
+        'Grenzwertig' { 'Knapp - nur ohne Reserve' }
+        default       { 'Reicht nicht' }
+    }
+}
+$simpleCards = ""
+foreach ($v in $verdicts) {
+    $sl = Simple-Label $v.Label
+    $isRec = ($v.Size -eq $recSize)
+    $badge = if ($isRec) { "<div class='rec-badge'>&#9733; Empfehlung</div>" } else { "" }
+    $ring  = if ($isRec) { "box-shadow:0 0 0 3px $($v.Color)" } else { "" }
+    $simpleCards += @"
+<div class="scard" style="$ring">
+  <div class="dot" style="background:$($v.Color)"></div>
+  <div class="ssize">$($v.Size) GB</div>
+  <div class="slabel" style="color:$($v.Color)">$sl</div>
+  $badge
+</div>
+"@
+}
+$top3 = if ($appTable.Count -gt 0) { (@($appTable | Select-Object -First 3 | ForEach-Object { $_.Programm }) -join ', ') } else { 'die ueblichen Programme' }
+
+$simpleConf = ""
+if ($confLevel -eq 'gering') {
+    $simpleConf = "<div class='sbanner' style='background:#dc2626'>Achtung: Die Messung war bisher sehr kurz - die Empfehlung ist noch <b>nicht verlaesslich</b>. Bitte an mehreren echten Arbeitstagen weitermessen.</div>"
+} elseif ($confLevel -eq 'mittel') {
+    $simpleConf = "<div class='sbanner' style='background:#d97706'>Hinweis: Fuer mehr Sicherheit ueber mehrere volle Arbeitstage messen.</div>"
+}
+
+$htmlSimple = @"
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAM-Empfehlung $(HtmlEncode $selMachine)</title>
+<style>
+  :root { --bg:#f4f6fb; --fg:#0f172a; --muted:#64748b; --card:#fff; --line:#e2e8f0; }
+  @media (prefers-color-scheme: dark){ :root{ --bg:#0b1220; --fg:#e2e8f0; --muted:#94a3b8; --card:#1e293b; --line:#334155; } }
+  *{box-sizing:border-box}
+  body{font-family:"Segoe UI",system-ui,sans-serif;margin:0;padding:2rem 1.5rem;background:var(--bg);color:var(--fg);line-height:1.6}
+  .wrap{max-width:760px;margin:0 auto}
+  h1{font-size:1.5rem;margin:0 0 .3rem}
+  .sub{color:var(--muted);margin-bottom:1.4rem}
+  .sbanner{color:#fff;border-radius:12px;padding:.9rem 1.1rem;margin-bottom:1.2rem}
+  .rec{border-radius:16px;padding:1.6rem 1.6rem;color:#fff;background:$recColor;margin-bottom:1.6rem}
+  .rec .k{font-size:.8rem;text-transform:uppercase;letter-spacing:.05em;opacity:.9}
+  .rec .v{font-size:3rem;font-weight:800;line-height:1;margin:.2rem 0 .5rem}
+  .rec .p{font-size:1.05rem;opacity:.97}
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:.8rem;margin:1.2rem 0}
+  .scard{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:1.1rem .8rem;text-align:center;position:relative}
+  .dot{width:16px;height:16px;border-radius:50%;margin:0 auto .5rem}
+  .ssize{font-size:1.4rem;font-weight:800}
+  .slabel{font-size:.9rem;font-weight:600;margin-top:.2rem}
+  .rec-badge{margin-top:.5rem;font-size:.72rem;font-weight:700;color:var(--fg)}
+  .box{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:1.1rem 1.3rem;margin:1rem 0}
+  .box h2{font-size:1.05rem;margin:0 0 .4rem}
+  .muted{color:var(--muted)}
+  footer{margin-top:1.6rem;font-size:.8rem;color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Wie viel Arbeitsspeicher braucht dieser Arbeitsplatz?</h1>
+  <div class="sub">Auswertung fuer Rechner <b>$(HtmlEncode $selMachine)</b> &middot; gemessen an $dayCount Tag(en)</div>
+
+  $simpleConf
+
+  <div class="rec">
+    <div class="k">Unsere Empfehlung</div>
+    <div class="v">$recSize GB</div>
+    <div class="p">$(HtmlEncode $plain)</div>
+  </div>
+
+  <div class="cards">
+$simpleCards
+  </div>
+
+  <div class="box">
+    <h2>Was bedeutet das?</h2>
+    <p class="muted">Wir haben gemessen, wie viel Arbeitsspeicher die Programme an diesem Arbeitsplatz im Alltag wirklich anfordern. Die gruen/gelb/rote Einstufung oben zeigt, welche Speichergroesse gut passt. Etwas Reserve ist eingeplant, damit auch bei vielen gleichzeitig offenen Programmen alles fluessig laeuft.</p>
+  </div>
+
+  <div class="box">
+    <h2>Was wurde gemessen?</h2>
+    <p class="muted">Ueber $sampleCount Messpunkte an $dayCount Tag(en) am Rechner $(HtmlEncode $selMachine). Die groessten Speicher-Verbraucher waren: <b>$(HtmlEncode $top3)</b>. Es wurden nur Speicherwerte und Programmnamen erfasst - keine Inhalte, Dateien oder Eingaben.</p>
+  </div>
+
+  <p class="muted">Mehr Details (Zahlen, Verlauf, Technik) stehen im ausfuehrlichen Bericht fuer die IT.</p>
+  <footer>Erstellt am $(Get-Date -Format 'dd.MM.yyyy HH:mm') &middot; RAM-Monitor - einfacher Bericht</footer>
 </div>
 </body>
 </html>
 "@
 
-$html | Out-File -FilePath $OutputHtml -Encoding UTF8
-Write-Host (" HTML-Bericht   : {0}" -f $OutputHtml) -ForegroundColor Green
+# ===========================================================================
+# Zusammenfassung als CSV (fuer die IT / Excel)
+# ===========================================================================
+$allStart = ($runs | Where-Object Start | Sort-Object Start | Select-Object -First 1).Start
+$allEnd   = ($runs | Where-Object End   | Sort-Object End   | Select-Object -Last 1).End
+$summary = [pscustomobject]@{
+    Rechner                  = $selMachine
+    Von                      = if ($allStart) { $allStart.ToString('yyyy-MM-dd HH:mm') } else { '' }
+    Bis                      = if ($allEnd)   { $allEnd.ToString('yyyy-MM-dd HH:mm') }   else { '' }
+    Messtage                 = $dayCount
+    Messpunkte               = $sampleCount
+    VerbauterRAM_GB          = $totalPhys
+    Commit_Max_GB            = $commitMax
+    Commit_p99_GB            = $commitP99
+    Commit_p95_GB            = $commitP95
+    Commit_Median_GB         = $commitP50
+    PhysischOhneCache_Max_GB = $physNetMax
+    Verfuegbar_Min_GB        = $availMin
+    Speicherdruck_Messpunkte = $pressureSamples
+    Empfehlung_GB            = $recSize
+    Konfidenz                = $confLevel
+}
+
+# ===========================================================================
+# Dateien schreiben (je nach Zielgruppe)
+# ===========================================================================
+$stamp   = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
+$written = @()
+
+if ($Zielgruppe -eq 'IT' -or $Zielgruppe -eq 'Beide') {
+    $itPath = if (-not [string]::IsNullOrWhiteSpace($OutputHtml)) { $OutputHtml } else { Join-Path $InputFolder ("IT-Detailbericht_{0}_{1}.html" -f $selMachine, $stamp) }
+    $htmlIT | Out-File -FilePath $itPath -Encoding UTF8
+    $written += $itPath
+    $csvPath = Join-Path $InputFolder ("Zusammenfassung_{0}_{1}.csv" -f $selMachine, $stamp)
+    $summary | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+    $written += $csvPath
+}
+if ($Zielgruppe -eq 'Einfach' -or $Zielgruppe -eq 'Beide') {
+    $sPath = Join-Path $InputFolder ("Einfach-Bericht_{0}_{1}.html" -f $selMachine, $stamp)
+    $htmlSimple | Out-File -FilePath $sPath -Encoding UTF8
+    $written += $sPath
+}
+
+Write-Host " Erzeugte Exporte:" -ForegroundColor Green
+foreach ($w in $written) { Write-Host ("   {0}" -f $w) }
 Write-Host "===================================================================" -ForegroundColor Cyan
