@@ -238,9 +238,12 @@ function Get-Verdict {
     elseif ($r -le 1.02) { return [pscustomobject]@{ Label='Grenzwertig'; Color='#d97706'; Ratio=$r } }
     else                 { return [pscustomobject]@{ Label='Zu klein';    Color='#dc2626'; Ratio=$r } }
 }
+# Ampel und Kopf-Empfehlung nutzen DIESELBE Basis (Commit p95), damit die
+# markierte Empfehlung nie einer rot bewerteten Zeile widerspricht. Der
+# physische Bedarf ist die Gegenprobe (Zwei-Faktor-Logik + Realitaets-Check).
 $sizes = 16, 32, 64
 $verdicts = foreach ($s in $sizes) {
-    $v = Get-Verdict -Need $needP99 -Size $s
+    $v = Get-Verdict -Need $commitP95 -Size $s
     [pscustomobject]@{ Size=$s; Label=$v.Label; Color=$v.Color; Ratio=$v.Ratio }
 }
 # ---------------------------------------------------------------------------
@@ -271,7 +274,7 @@ if ($commitP95 -gt 32) { $recSize = [math]::Max($recSize, 64) }
 # darueber
 if ($commitP95 -gt 64) { $recSize = 128 }
 
-$recVerdict = Get-Verdict -Need $needP99 -Size $recSize
+$recVerdict = Get-Verdict -Need $commitP95 -Size $recSize
 $recColor = if ($recSize -le 64) { $recVerdict.Color } else { '#dc2626' }
 
 # Divergenz erkennen: Commit wuerde eine groessere Klasse nahelegen, physisch
@@ -562,7 +565,7 @@ $html = @"
   </div>
 
   <h2>Reicht welche Groesse? <span class="info" title="Auslastung = benoetigter Speicher geteilt durch die Groesse. Unter 75% = viel Reserve, bis 90% = ok, bis ca. 100% = knapp, darueber = zu klein.">?</span></h2>
-  <p class="muted">Bewertet anhand des <b>Dauerbedarfs (p99)</b> von <b>$(Fmt $needP99) GB</b>. Gruen = komfortabel, Gelb/Orange = knapp, Rot = zu klein. &#9733; = Empfehlung.</p>
+  <p class="muted">Bewertet anhand des <b>zugesicherten Speichers (Commit p95)</b> von <b>$(Fmt $commitP95) GB</b>. Gruen = komfortabel, Gelb/Orange = knapp, Rot = zu klein. &#9733; = Empfehlung.</p>
   <p class="muted"><b>Realitaets-Check:</b> Zugesichert (Commit p95) = $(Fmt $commitP95) GB &middot; tatsaechlich physisch belegt (max, ohne Cache) = $(Fmt $physNetMax) GB. Die Empfehlung stuft nur dann hoch, wenn <b>beide</b> Werte hoch sind - reservierter, aber ungenutzter Speicher fuehrt so nicht zu einem Fehlkauf.</p>
   <div class="tablewrap"><table class="sizetable">
     <thead><tr><th>Groesse</th><th>Auslastung</th><th class="num">%</th><th>Bewertung</th></tr></thead>
