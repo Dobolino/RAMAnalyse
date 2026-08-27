@@ -61,12 +61,23 @@ if (-not (Test-Path $OutputFolder)) {
     New-Item -ItemType Directory -Path $OutputFolder -Force | Out-Null
 }
 
-# Rechnername + Startzeit in die Dateinamen, damit sich Laeufe (und mehrere
-# Test-PCs) nicht gegenseitig ueberschreiben.
-$stamp       = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
-$machine     = $env:COMPUTERNAME
-$systemCsv   = Join-Path $OutputFolder ("system_{0}_{1}.csv"    -f $machine, $stamp)
-$processCsv  = Join-Path $OutputFolder ("prozesse_{0}_{1}.csv"  -f $machine, $stamp)
+# Tagesbasierte Dateinamen: Eine Mehrtages-Messung rotiert automatisch pro Tag
+# (eine Datei je Tag). Mehrere Laeufe am selben Tag haengen an dieselbe Datei an
+# -> durchgehende Zeitachse. Rechnername im Namen trennt mehrere Test-PCs.
+$machine = $env:COMPUTERNAME
+function Get-CsvPaths {
+    param([string]$Folder, [string]$Machine)
+    $dateKey = Get-Date -Format 'yyyy-MM-dd'
+    [pscustomobject]@{
+        DateKey    = $dateKey
+        SystemCsv  = Join-Path $Folder ("system_{0}_{1}.csv"   -f $Machine, $dateKey)
+        ProcessCsv = Join-Path $Folder ("prozesse_{0}_{1}.csv" -f $Machine, $dateKey)
+    }
+}
+$paths      = Get-CsvPaths -Folder $OutputFolder -Machine $machine
+$currentDay = $paths.DateKey
+$systemCsv  = $paths.SystemCsv
+$processCsv = $paths.ProcessCsv
 
 # Physischer Gesamtspeicher (einmalig, aendert sich nicht).
 $os            = Get-CimInstance Win32_OperatingSystem
@@ -83,8 +94,8 @@ Write-Host (" Rechner        : {0}" -f $machine)
 Write-Host (" Physischer RAM : {0} GB" -f $totalPhysGB)
 Write-Host (" Intervall      : {0} s" -f $IntervalSeconds)
 Write-Host (" Laufzeit       : {0}" -f $(if ($DurationMinutes -gt 0) { "$DurationMinutes min" } else { "unbegrenzt (STRG+C zum Beenden)" }))
-Write-Host (" System-CSV     : {0}" -f $systemCsv)
-Write-Host (" Prozess-CSV    : {0}" -f $processCsv)
+Write-Host (" Datenordner    : {0}" -f $OutputFolder)
+Write-Host (" Aktuelle Datei : {0}  (rotiert taeglich)" -f (Split-Path $systemCsv -Leaf))
 Write-Host "-------------------------------------------------------------------"
 Write-Host " Laeuft ... Fenster offen lassen. Beenden mit STRG+C." -ForegroundColor Yellow
 Write-Host ""
@@ -133,6 +144,7 @@ function Get-SystemSample {
 
     [pscustomobject]@{
         Timestamp        = $ts.ToString('yyyy-MM-dd HH:mm:ss')
+        Machine          = $machine
         TotalPhysicalGB  = $totalPhysGB
         PhysicalInUseGB  = $inUsePhysGB
         AvailableGB      = $availGB
@@ -168,6 +180,7 @@ function Get-ProcessSample {
     $rows = foreach ($g in $top) {
         [pscustomobject]@{
             Timestamp     = $Timestamp
+            Machine       = $machine
             ProcessName   = $g.Name
             InstanceCount = $g.InstanceCount
             WorkingSetGB  = $g.WorkingSetGB
@@ -178,6 +191,7 @@ function Get-ProcessSample {
     if ($rest) {
         $rows += [pscustomobject]@{
             Timestamp     = $Timestamp
+            Machine       = $machine
             ProcessName   = '(sonstige)'
             InstanceCount = ($rest | Measure-Object InstanceCount -Sum).Sum
             WorkingSetGB  = [math]::Round(($rest | Measure-Object WorkingSetGB -Sum).Sum, 3)
@@ -195,6 +209,15 @@ try {
     while ((Get-Date) -lt $endTime) {
         $sampleNo++
         try {
+            # Tageswechsel? Dann auf die Datei des neuen Tages umschalten.
+            $p = Get-CsvPaths -Folder $OutputFolder -Machine $machine
+            if ($p.DateKey -ne $currentDay) {
+                $currentDay = $p.DateKey
+                $systemCsv  = $p.SystemCsv
+                $processCsv = $p.ProcessCsv
+                Write-Host ("--- Neuer Tag: schreibe nun in {0} ---" -f (Split-Path $systemCsv -Leaf)) -ForegroundColor DarkCyan
+            }
+
             $sys  = Get-SystemSample
             $proc = Get-ProcessSample -Timestamp $sys.Timestamp
 
@@ -228,7 +251,8 @@ finally {
     Write-Host (" System-CSV  : {0}" -f $systemCsv)
     Write-Host (" Prozess-CSV : {0}" -f $processCsv)
     Write-Host ""
-    Write-Host " Auswertung starten mit:" -ForegroundColor Yellow
-    Write-Host ("   .\Analyze-Memory.ps1 -SystemCsv `"{0}`" -ProcessCsv `"{1}`"" -f $systemCsv, $processCsv)
+    Write-Host " Auswertung starten mit (wertet automatisch ALLE Messtage aus):" -ForegroundColor Yellow
+    Write-Host "   .\Analyze-Memory.ps1"
+    Write-Host " Oder Doppelklick auf 'Auswertung-starten.cmd'."
     Write-Host "==================================================================="  -ForegroundColor Cyan
 }

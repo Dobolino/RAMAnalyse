@@ -35,6 +35,37 @@ die künftigen Geräte ausreicht.
 > mehrere CAD-Projekte, Videokonferenz und viele Browser-Tabs gleichzeitig
 > offen sind. Der **Spitzenbedarf** entscheidet über die richtige RAM-Größe.
 
+### Über mehrere Tage messen (wichtig!)
+
+Du kannst die Messung **an mehreren Tagen** starten – die Auswertung fasst
+**automatisch alle Messungen zusammen** und rechnet daraus ein Gesamtergebnis.
+
+- Der Logger legt **pro Tag eine Datei** an (Tagesrotation). Startest du an
+  einem Tag mehrmals, wird an dieselbe Tagesdatei angehängt (durchgehende
+  Zeitachse).
+- Misst du also z. B. an 5 Tagen, entstehen 5 Tagesdateien – und
+  `Auswertung-starten.cmd` wertet **alle 5 gemeinsam** aus (Spitze und p99 über
+  die gesamte Woche). Zusätzlich zeigt der Bericht eine **Aufschlüsselung pro
+  Messtag**.
+- **Nichts löschen** zwischen den Tagen – einfach die Dateien im Ordner
+  `Messdaten` liegen lassen. Je mehr echte Arbeitstage, desto belastbarer die
+  Empfehlung.
+- Läuft die Messung über Mitternacht durch, wechselt der Logger selbstständig
+  auf die Datei des neuen Tages.
+
+> Der Bericht warnt deutlich, wenn die Messung **zu kurz** war (zu wenige
+> Messpunkte / zu kurze Dauer) – dann ist die Empfehlung noch nicht belastbar.
+
+### Mehrere Test-PCs
+
+Der Rechnername steht im Dateinamen. Liegen im selben Ordner Messungen
+verschiedener PCs, wertet der Bericht standardmäßig den PC mit den meisten
+Messpunkten aus und weist auf die anderen hin. Gezielt auswerten:
+
+```powershell
+.\Analyze-Memory.ps1 -Machine PC-NAME
+```
+
 ---
 
 ## Was wird gemessen?
@@ -77,6 +108,16 @@ Zusätzlich erfasst das Tool:
 
 Der Bericht nennt getrennt die Empfehlung für den **Dauerbedarf (p99)** und für
 **seltene Spitzen (Maximum)**, damit ihr die Abwägung transparent trefft.
+
+Der HTML-Bericht zeigt das laienverständlich als **Ampel** („reicht welche
+Größe?" mit grün/gelb/rot), als **Verlaufs-Diagramm**, mit **Erklärungen zu
+jeder Zahl** (Info-Symbole zum Überfahren) und einem **Glossar**. Zusätzlich:
+„Was lief beim Höchststand?" (die offenen Programme im Moment des höchsten
+Bedarfs) und eine Aufschlüsselung pro Messtag.
+
+> Hinweis zur Auslagerung: Als „Speicherdruck" wird sie nur gewertet, wenn
+> **gleichzeitig wenig RAM frei** war. Normales Nachladen von Programmdateien
+> (ohne Knappheit) löst also keinen Fehlalarm aus.
 
 ---
 

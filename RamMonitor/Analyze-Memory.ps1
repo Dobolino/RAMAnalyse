@@ -1,39 +1,34 @@
 <#
 .SYNOPSIS
-    Wertet die von Track-Memory.ps1 erzeugten CSV-Dateien aus und gibt eine
-    RAM-Empfehlung (16 / 32 / 64 GB) samt HTML-Bericht aus.
+    Wertet die von Track-Memory.ps1 erzeugten CSV-Dateien aus und erzeugt einen
+    laienverstaendlichen HTML-Bericht mit RAM-Empfehlung (16 / 32 / 64 GB).
 
 .BESCHREIBUNG
-    Kernidee der Auswertung:
-      * Massgeblich ist die zugesicherte Speichermenge (Commit Charge). Sie
-        beschreibt den echten Bedarf und ist unabhaengig vom verbauten RAM.
-      * Es werden Maximum sowie die Perzentile p50/p95/p99 gebildet. Ein
-        einzelner Ausreisser (Max) muss die Beschaffung nicht bestimmen -
-        p95/p99 zeigt den praktischen Dauerbedarf.
-      * Fuer eine Speichergroesse gilt sie als komfortabel, wenn der Bedarf
-        rund 80% der Groesse nicht ueberschreitet (Rest = Reserve fuer Spitzen
-        und Datei-Cache, der z.B. das Laden grosser CAD-Plaene beschleunigt).
-      * Zusaetzlich wird die Auslagerung (harte Seitenfehler) geprueft. Auf dem
-        64-GB-Testgeraet sollte sie ~0 sein; taucht sie auf, wird es eng.
+    Standardmaessig werden ALLE Messungen im Datenordner zusammen ausgewertet
+    (z. B. fuenf Messtage -> ein Gesamtergebnis). Man kann mit -SystemCsv auch
+    gezielt eine einzelne Datei auswerten.
+
+    Methodik (siehe Glossar im Bericht):
+      * Leitgroesse ist der zugesicherte Speicher (Commit Charge).
+      * Gegenprobe: physisch genutzter Speicher ohne Datei-Cache.
+      * Empfehlung = das Maximum aus beiden Wegen, mit Reserve.
+      * Auslagerung zaehlt nur dann als Speichermangel, wenn GLEICHZEITIG wenig
+        RAM frei war (verhindert Fehlalarme durch normales Nachladen).
 
 .PARAMETER SystemCsv
-    Pfad zur system_*.csv. Wenn leer, wird die neueste im Ordner "Messdaten"
-    (bzw. -InputFolder) verwendet.
-
+    Genau eine system_*.csv auswerten (statt aller). Optional.
 .PARAMETER ProcessCsv
-    Pfad zur prozesse_*.csv. Wenn leer, wird die passende neueste gesucht.
-
+    Passende prozesse_*.csv zu -SystemCsv. Optional (wird sonst abgeleitet).
 .PARAMETER InputFolder
-    Ordner, in dem nach den neuesten CSV-Dateien gesucht wird, falls keine
-    Pfade angegeben sind. Standard: Unterordner "Messdaten" neben dem Skript.
-
+    Ordner mit den CSV-Dateien. Standard: Unterordner "Messdaten" neben dem Skript.
+.PARAMETER Machine
+    Nur Messungen dieses Rechners auswerten (bei mehreren Test-PCs im Ordner).
 .PARAMETER OutputHtml
-    Pfad fuer den HTML-Bericht. Standard: Bericht_<Zeitstempel>.html im
-    Eingabeordner.
+    Zielpfad des HTML-Berichts. Standard: Bericht_<Zeitstempel>.html im Ordner.
 
 .BEISPIEL
     .\Analyze-Memory.ps1
-    Nimmt automatisch die neueste Messung und erzeugt Konsolenausgabe + HTML.
+    Wertet alle Messtage im Ordner "Messdaten" aus.
 #>
 
 [CmdletBinding()]
@@ -41,199 +36,424 @@ param(
     [string]$SystemCsv,
     [string]$ProcessCsv,
     [string]$InputFolder,
+    [string]$Machine,
     [string]$OutputHtml
 )
 
 $ErrorActionPreference = 'Stop'
+$inv = [System.Globalization.CultureInfo]::InvariantCulture
 
-# ---------------------------------------------------------------------------
-# Eingabedateien bestimmen
-# ---------------------------------------------------------------------------
-$scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
-if ([string]::IsNullOrWhiteSpace($InputFolder)) {
-    $InputFolder = Join-Path $scriptDir 'Messdaten'
-}
-
-if ([string]::IsNullOrWhiteSpace($SystemCsv)) {
-    $SystemCsv = (Get-ChildItem -Path $InputFolder -Filter 'system_*.csv' -ErrorAction SilentlyContinue |
-                  Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-}
-if ([string]::IsNullOrWhiteSpace($ProcessCsv)) {
-    $ProcessCsv = (Get-ChildItem -Path $InputFolder -Filter 'prozesse_*.csv' -ErrorAction SilentlyContinue |
-                   Sort-Object LastWriteTime -Descending | Select-Object -First 1).FullName
-}
-
-if (-not $SystemCsv -or -not (Test-Path $SystemCsv)) {
-    throw "Keine System-CSV gefunden. Bitte -SystemCsv angeben oder zuerst Track-Memory.ps1 laufen lassen."
-}
-
-Write-Host ("System-CSV : {0}" -f $SystemCsv)
-Write-Host ("Prozess-CSV: {0}" -f $(if ($ProcessCsv) { $ProcessCsv } else { '(keine)' }))
-
-# ---------------------------------------------------------------------------
-# Daten einlesen und in Zahlen wandeln
-# ---------------------------------------------------------------------------
-$sys = Import-Csv -Path $SystemCsv
-if (-not $sys -or $sys.Count -eq 0) { throw "Die System-CSV enthaelt keine Daten." }
-
-# CSV-Felder sind Text -> in Double umwandeln (kultur-invariant, damit sowohl
-# Punkt- als auch Komma-Dezimaltrennung korrekt gelesen wird).
+# ===========================================================================
+# Hilfsfunktionen
+# ===========================================================================
 function ConvertTo-Double($value) {
     if ($null -eq $value -or $value -eq '') { return 0.0 }
     $d = 0.0
     $s = ([string]$value).Replace(',', '.')
-    if ([double]::TryParse($s, [System.Globalization.NumberStyles]::Any, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$d)) {
-        return $d
-    }
+    if ([double]::TryParse($s, [System.Globalization.NumberStyles]::Any, $inv, [ref]$d)) { return $d }
     return 0.0
 }
+function Fmt([double]$v, [int]$dec = 2) { return $v.ToString('N' + $dec, $inv) }
 
-$committed = $sys | ForEach-Object { ConvertTo-Double $_.CommittedGB }
-$physInUse = $sys | ForEach-Object { ConvertTo-Double $_.PhysicalInUseGB }
-$avail     = $sys | ForEach-Object { ConvertTo-Double $_.AvailableGB }
-$pageReads = $sys | ForEach-Object { ConvertTo-Double $_.PageReadsPerSec }
-$totalPhys = ($sys | ForEach-Object { ConvertTo-Double $_.TotalPhysicalGB } | Measure-Object -Maximum).Maximum
-
-# ---------------------------------------------------------------------------
-# Statistik-Hilfsfunktionen
-# ---------------------------------------------------------------------------
 function Get-Percentile {
     param([double[]]$Data, [double]$Percentile)
     if (-not $Data -or $Data.Count -eq 0) { return 0 }
-    $sorted = $Data | Sort-Object
+    $sorted = @($Data | Sort-Object)
+    if ($sorted.Count -eq 1) { return [math]::Round($sorted[0], 2) }
     $rank = ($Percentile / 100.0) * ($sorted.Count - 1)
-    $low  = [math]::Floor($rank)
-    $high = [math]::Ceiling($rank)
+    $low  = [int][math]::Floor($rank)
+    $high = [int][math]::Ceiling($rank)
     if ($low -eq $high) { return [math]::Round($sorted[$low], 2) }
     $frac = $rank - $low
     return [math]::Round($sorted[$low] + ($sorted[$high] - $sorted[$low]) * $frac, 2)
 }
-function Stat-Max($d) { if ($d.Count) { [math]::Round(($d | Measure-Object -Maximum).Maximum, 2) } else { 0 } }
-function Stat-Min($d) { if ($d.Count) { [math]::Round(($d | Measure-Object -Minimum).Minimum, 2) } else { 0 } }
-function Stat-Avg($d) { if ($d.Count) { [math]::Round(($d | Measure-Object -Average).Average, 2) } else { 0 } }
+function Stat-Max($d) { if ($d -and @($d).Count) { [math]::Round((@($d) | Measure-Object -Maximum).Maximum, 2) } else { 0 } }
+function Stat-Min($d) { if ($d -and @($d).Count) { [math]::Round((@($d) | Measure-Object -Minimum).Minimum, 2) } else { 0 } }
+function Stat-Avg($d) { if ($d -and @($d).Count) { [math]::Round((@($d) | Measure-Object -Average).Average, 2) } else { 0 } }
+function HtmlEncode($s) { return ([string]$s).Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;') }
 
-$sampleCount   = $sys.Count
-$firstTs       = $sys[0].Timestamp
-$lastTs        = $sys[$sampleCount - 1].Timestamp
+function Parse-Ts([string]$s) {
+    $dt = [datetime]::MinValue
+    if ([datetime]::TryParseExact($s, 'yyyy-MM-dd HH:mm:ss', $inv, [System.Globalization.DateTimeStyles]::None, [ref]$dt)) { return $dt }
+    if ([datetime]::TryParse($s, $inv, [System.Globalization.DateTimeStyles]::None, [ref]$dt)) { return $dt }
+    return $null
+}
 
+# ===========================================================================
+# Eingabedateien bestimmen
+# ===========================================================================
+$scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+if ([string]::IsNullOrWhiteSpace($InputFolder)) { $InputFolder = Join-Path $scriptDir 'Messdaten' }
+
+# Liste der auszuwertenden System-CSVs (je Eintrag: System- + zugehoerige Prozess-CSV)
+$systemFiles = @()
+if (-not [string]::IsNullOrWhiteSpace($SystemCsv)) {
+    if (-not (Test-Path $SystemCsv)) { throw "Angegebene System-CSV nicht gefunden: $SystemCsv" }
+    $systemFiles = @($SystemCsv)
+} else {
+    $systemFiles = @(Get-ChildItem -Path $InputFolder -Filter 'system_*.csv' -ErrorAction SilentlyContinue |
+                     Sort-Object Name | Select-Object -ExpandProperty FullName)
+}
+if (-not $systemFiles -or $systemFiles.Count -eq 0) {
+    throw "Keine System-CSV gefunden in '$InputFolder'. Bitte zuerst Track-Memory.ps1 laufen lassen."
+}
+
+# ===========================================================================
+# Runs einlesen
+# ===========================================================================
+function Get-MachineFromFile([string]$sysFile, $firstRow) {
+    if ($firstRow -and $firstRow.PSObject.Properties.Name -contains 'Machine' -and $firstRow.Machine) {
+        return [string]$firstRow.Machine
+    }
+    # Fallback: aus Dateinamen  system_<MACHINE>_<datum...>.csv
+    $base = [System.IO.Path]::GetFileNameWithoutExtension($sysFile)
+    $base = $base -replace '^system_', ''
+    return ($base -split '_')[0]
+}
+
+$runs = @()
+foreach ($sf in $systemFiles) {
+    $rows = @(Import-Csv -Path $sf)
+    if (-not $rows -or $rows.Count -eq 0) { continue }
+
+    $mach = Get-MachineFromFile $sf $rows[0]
+
+    # Passende Prozess-CSV finden
+    $pf = $null
+    if (-not [string]::IsNullOrWhiteSpace($ProcessCsv) -and (Test-Path $ProcessCsv)) {
+        $pf = $ProcessCsv
+    } else {
+        $cand = $sf -replace 'system_', 'prozesse_'
+        if (Test-Path $cand) { $pf = $cand }
+    }
+    $prows = @()
+    if ($pf) { $prows = @(Import-Csv -Path $pf) }
+
+    $starts = Parse-Ts $rows[0].Timestamp
+    $ends   = Parse-Ts $rows[$rows.Count - 1].Timestamp
+
+    $runs += [pscustomobject]@{
+        SystemFile  = $sf
+        ProcessFile = $pf
+        Machine     = $mach
+        Rows        = $rows
+        ProcRows    = $prows
+        Start       = $starts
+        End         = $ends
+        Samples     = $rows.Count
+    }
+}
+if ($runs.Count -eq 0) { throw "Die gefundenen CSV-Dateien enthalten keine Daten." }
+
+# Mehrere Rechner? -> auf einen einschraenken (sonst waere die Aggregation falsch).
+$machines = @($runs | Select-Object -ExpandProperty Machine -Unique)
+$ignoredMachines = @()
+if (-not [string]::IsNullOrWhiteSpace($Machine)) {
+    $selMachine = $Machine
+} elseif ($machines.Count -eq 1) {
+    $selMachine = $machines[0]
+} else {
+    # Rechner mit den meisten Messpunkten waehlen
+    $selMachine = ($runs | Group-Object Machine |
+                   Sort-Object { ($_.Group | Measure-Object Samples -Sum).Sum } -Descending |
+                   Select-Object -First 1).Name
+    $ignoredMachines = @($machines | Where-Object { $_ -ne $selMachine })
+}
+$runs = @($runs | Where-Object { $_.Machine -eq $selMachine })
+if ($runs.Count -eq 0) { throw "Keine Messungen fuer Rechner '$selMachine' gefunden." }
+
+# ===========================================================================
+# Kombinierte Kennzahlen ueber ALLE Runs
+# ===========================================================================
+$committed = New-Object System.Collections.Generic.List[double]
+$physInUse = New-Object System.Collections.Generic.List[double]
+$physNet   = New-Object System.Collections.Generic.List[double]   # physisch genutzt OHNE Cache
+$avail     = New-Object System.Collections.Generic.List[double]
+$pageReads = New-Object System.Collections.Generic.List[double]
+$totalPhys = 0.0
+$peakCommit = -1.0; $peakRun = $null; $peakTs = $null
+
+foreach ($r in $runs) {
+    foreach ($row in $r.Rows) {
+        $c  = ConvertTo-Double $row.CommittedGB
+        $pu = ConvertTo-Double $row.PhysicalInUseGB
+        $ca = ConvertTo-Double $row.CacheGB
+        $av = ConvertTo-Double $row.AvailableGB
+        $pr = ConvertTo-Double $row.PageReadsPerSec
+        $tp = ConvertTo-Double $row.TotalPhysicalGB
+        $committed.Add($c); $physInUse.Add($pu); $avail.Add($av); $pageReads.Add($pr)
+        $net = $pu - $ca; if ($net -lt 0) { $net = 0 }
+        $physNet.Add($net)
+        if ($tp -gt $totalPhys) { $totalPhys = $tp }
+        if ($c -gt $peakCommit) { $peakCommit = $c; $peakRun = $r; $peakTs = $row.Timestamp }
+    }
+}
+
+$sampleCount = $committed.Count
 $commitMax = Stat-Max $committed
-$commitP99 = Get-Percentile -Data $committed -Percentile 99
-$commitP95 = Get-Percentile -Data $committed -Percentile 95
-$commitP50 = Get-Percentile -Data $committed -Percentile 50
+$commitP99 = Get-Percentile -Data $committed.ToArray() -Percentile 99
+$commitP95 = Get-Percentile -Data $committed.ToArray() -Percentile 95
+$commitP50 = Get-Percentile -Data $committed.ToArray() -Percentile 50
 $commitAvg = Stat-Avg $committed
 
-$physMax   = Stat-Max $physInUse
-$physAvg   = Stat-Avg $physInUse
-$availMin  = Stat-Min $avail
-$pageMax   = Stat-Max $pageReads
-$pagePressureSamples = ($pageReads | Where-Object { $_ -gt 50 }).Count
-$lowAvailSamples     = ($avail     | Where-Object { $_ -lt 1 }).Count
+$physMax    = Stat-Max $physInUse
+$physNetP99 = Get-Percentile -Data $physNet.ToArray() -Percentile 99
+$physNetMax = Stat-Max $physNet
+$availMin   = Stat-Min $avail
+$pageMax    = Stat-Max $pageReads
+
+# Gesamtdauer + Messtage
+$spanMinutes = 0.0
+$days = @()
+foreach ($r in $runs) {
+    if ($r.Start -and $r.End) { $spanMinutes += ($r.End - $r.Start).TotalMinutes }
+    if ($r.Start) { $days += $r.Start.ToString('yyyy-MM-dd') }
+}
+$dayCount = @($days | Select-Object -Unique).Count
+$spanText = if ($spanMinutes -ge 120) { "{0} h" -f (Fmt ($spanMinutes/60) 1) } else { "{0} min" -f ([int]$spanMinutes) }
 
 # ---------------------------------------------------------------------------
-# Empfehlungslogik
+# B1: Auslagerung nur mit wenig-frei koppeln
 # ---------------------------------------------------------------------------
-# Zielwert = massgeblicher Bedarf. Wir nehmen p99 (praktischer Spitzenbedarf,
-# unempfindlich gegen einen einzelnen Ausreisser) als Grundlage und pruefen
-# gegen die 80%-Schwelle der Kandidatengroessen.
+$lowAvailGB = [math]::Max(1.0, [math]::Round($totalPhys * 0.05, 1))
+$pressureSamples = 0
+for ($i = 0; $i -lt $sampleCount; $i++) {
+    if ($pageReads[$i] -gt 50 -and $avail[$i] -lt $lowAvailGB) { $pressureSamples++ }
+}
+
+# ---------------------------------------------------------------------------
+# B3: Bedarf = max(Commit-Weg, Physisch-ohne-Cache-Weg)
+# ---------------------------------------------------------------------------
+$needP99 = [math]::Max($commitP99, $physNetP99)
+$needMax = [math]::Max($commitMax, $physNetMax)
+
+# ---------------------------------------------------------------------------
+# Ampel-Bewertung je Groesse
+# ---------------------------------------------------------------------------
+function Get-Verdict {
+    param([double]$Need, [double]$Size)
+    $r = if ($Size -gt 0) { $Need / $Size } else { 9 }
+    if     ($r -le 0.75) { return [pscustomobject]@{ Label='Komfortabel'; Color='#16a34a'; Ratio=$r } }
+    elseif ($r -le 0.90) { return [pscustomobject]@{ Label='Ausreichend'; Color='#65a30d'; Ratio=$r } }
+    elseif ($r -le 1.02) { return [pscustomobject]@{ Label='Grenzwertig'; Color='#d97706'; Ratio=$r } }
+    else                 { return [pscustomobject]@{ Label='Zu klein';    Color='#dc2626'; Ratio=$r } }
+}
 $sizes = 16, 32, 64
-function Recommend-Size {
-    param([double]$NeedGB)
-    foreach ($s in $sizes) {
-        if ($NeedGB -le ($s * 0.80)) { return $s }
-    }
-    return 128
+$verdicts = foreach ($s in $sizes) {
+    $v = Get-Verdict -Need $needP99 -Size $s
+    [pscustomobject]@{ Size=$s; Label=$v.Label; Color=$v.Color; Ratio=$v.Ratio }
 }
-$recByP99 = Recommend-Size $commitP99
-$recByMax = Recommend-Size $commitMax
+# Empfehlung = kleinste Groesse, die mindestens "Ausreichend" (Ratio <= 0.90) ist
+$rec = ($verdicts | Where-Object { $_.Ratio -le 0.90 } | Select-Object -First 1)
+$recSize = if ($rec) { $rec.Size } else { 128 }
+$recColor = if ($rec) { $rec.Color } else { '#dc2626' }
 
-# Textbaustein je nach Ergebnis
-$verdict = ""
-if ($recByP99 -eq $recByMax) {
-    $verdict = "$recByP99 GB"
-} else {
-    $verdict = "$recByP99 GB (Dauerbedarf) - $recByMax GB nur fuer seltene Spitzen"
-}
-
-$pagingNote = if ($pageMax -gt 50) {
-    "ACHTUNG: Es wurde nennenswerte Auslagerung gemessen (max. $pageMax Seiten/s). Selbst mit den verbauten $totalPhys GB gab es zeitweise Speicherdruck - kleinere Groessen sind riskant."
-} else {
-    "Keine nennenswerte Auslagerung gemessen (max. $pageMax Seiten/s) - der Testrechner hatte durchgehend genug RAM."
+# Klartext-Empfehlung
+$borderline = ($verdicts | Where-Object { $_.Label -eq 'Grenzwertig' } | Select-Object -First 1)
+$plain = "Empfohlen werden $recSize GB Arbeitsspeicher fuer diesen Arbeitsplatz-Typ."
+if ($rec -and $borderline -and $borderline.Size -lt $recSize) {
+    $plain += " Die naechstkleinere Groesse ($($borderline.Size) GB) wuerde im Alltag meist reichen, aber ohne Reserve fuer Spitzen - davon ist abzuraten, wenn kuenftig mehr Software/Projekte dazukommen."
+} elseif (-not $rec) {
+    $plain += " Der gemessene Bedarf uebersteigt 64 GB - hier ist mehr noetig."
 }
 
 # ---------------------------------------------------------------------------
-# Prozess-Auswertung: Spitzenverbrauch je Programm
+# Konfidenz (Aussagekraft der Messung)
 # ---------------------------------------------------------------------------
+$confLevel = 'gut'; $confText = ''
+if ($sampleCount -lt 30 -or $spanMinutes -lt 120) {
+    $confLevel = 'gering'
+    $confText = "Diese Messung ist noch NICHT aussagekraeftig: nur $sampleCount Messpunkte ueber rund $spanText. Fuer eine belastbare Beschaffungsentscheidung bitte ueber mindestens einen vollen Arbeitstag messen - idealerweise mehrere Tage - und dabei die typische Last laufen lassen (mehrere CAD-Projekte, Videokonferenz, Browser gleichzeitig)."
+} elseif ($spanMinutes -lt 480 -or $dayCount -lt 2) {
+    $confLevel = 'mittel'
+    $confText = "Grundlage: $sampleCount Messpunkte ueber rund $spanText an $dayCount Tag(en). Fuer mehr Sicherheit ueber mehrere volle Arbeitstage messen."
+} else {
+    $confText = "Solide Grundlage: $sampleCount Messpunkte ueber rund $spanText an $dayCount Messtagen."
+}
+
+# ---------------------------------------------------------------------------
+# Auslagerungs-Hinweis (B1)
+# ---------------------------------------------------------------------------
+$pagingNote = if ($pressureSamples -gt 0) {
+    "In $pressureSamples Messpunkt(en) gab es echten Speicherdruck (Nachladen von der Platte bei gleichzeitig wenig freiem RAM). Selbst mit den verbauten $(Fmt $totalPhys) GB wurde es zeitweise eng - kleinere Groessen sind riskant."
+} else {
+    "Kein echter Speicherdruck gemessen (kein Nachladen bei knappem RAM). Der Testrechner hatte durchgehend genug Arbeitsspeicher."
+}
+
+# ---------------------------------------------------------------------------
+# Prozess-Auswertung (Spitzenverbrauch je Programm) ueber alle Runs
+# ---------------------------------------------------------------------------
+$allProc = New-Object System.Collections.Generic.List[object]
+foreach ($r in $runs) { foreach ($pr in $r.ProcRows) { $allProc.Add($pr) } }
+
 $appTable = @()
-if ($ProcessCsv -and (Test-Path $ProcessCsv)) {
-    $proc = Import-Csv -Path $ProcessCsv
-    $appTable = $proc | Group-Object ProcessName | ForEach-Object {
+if ($allProc.Count -gt 0) {
+    $appTable = $allProc | Group-Object ProcessName | ForEach-Object {
         $ws = $_.Group | ForEach-Object { ConvertTo-Double $_.WorkingSetGB }
         $pv = $_.Group | ForEach-Object { ConvertTo-Double $_.PrivateGB }
         [pscustomobject]@{
             Programm        = $_.Name
-            SpitzeArbeitsGB = Stat-Max $ws
-            MittelArbeitsGB = Stat-Avg $ws
             SpitzePrivatGB  = Stat-Max $pv
+            MittelPrivatGB  = Stat-Avg $pv
+            SpitzeArbeitsGB = Stat-Max $ws
         }
-    } | Sort-Object SpitzeArbeitsGB -Descending | Select-Object -First 30
+    } | Sort-Object SpitzePrivatGB -Descending | Select-Object -First 30
 }
 
 # ---------------------------------------------------------------------------
-# Konsolenausgabe
+# "Was lief beim Hoechststand?" - Prozesse zum Zeitpunkt des Commit-Maximums
 # ---------------------------------------------------------------------------
+$peakProc = @()
+if ($peakRun -and $peakRun.ProcRows.Count -gt 0 -and $peakTs) {
+    $peakProc = @($peakRun.ProcRows | Where-Object { $_.Timestamp -eq $peakTs } |
+        ForEach-Object {
+            [pscustomobject]@{
+                Programm  = $_.ProcessName
+                PrivatGB  = ConvertTo-Double $_.PrivateGB
+                ArbeitsGB = ConvertTo-Double $_.WorkingSetGB
+            }
+        } | Sort-Object PrivatGB -Descending | Select-Object -First 15)
+}
+
+# ===========================================================================
+# Konsolenausgabe (Kurzfassung)
+# ===========================================================================
 Write-Host ""
 Write-Host "===================================================================" -ForegroundColor Cyan
 Write-Host " AUSWERTUNG ARBEITSSPEICHER-BEDARF" -ForegroundColor Cyan
 Write-Host "===================================================================" -ForegroundColor Cyan
-Write-Host (" Zeitraum        : {0}  bis  {1}" -f $firstTs, $lastTs)
-Write-Host (" Messpunkte      : {0}" -f $sampleCount)
-Write-Host (" Verbauter RAM   : {0} GB" -f $totalPhys)
-Write-Host ""
-Write-Host " Zugesicherter Speicher (Commit Charge) - massgeblich:" -ForegroundColor White
-Write-Host ("   Maximum       : {0,6} GB" -f $commitMax)
-Write-Host ("   p99           : {0,6} GB" -f $commitP99)
-Write-Host ("   p95           : {0,6} GB" -f $commitP95)
-Write-Host ("   Median (p50)  : {0,6} GB" -f $commitP50)
-Write-Host ("   Mittelwert    : {0,6} GB" -f $commitAvg)
-Write-Host ""
-Write-Host (" Physisch belegt : max {0} GB / im Mittel {1} GB" -f $physMax, $physAvg)
-Write-Host (" Minimal frei    : {0} GB" -f $availMin)
-Write-Host (" Auslagerung     : max {0} Seiten/s" -f $pageMax)
-Write-Host ""
-Write-Host " EMPFEHLUNG      : $verdict" -ForegroundColor Green
-Write-Host " $pagingNote"
-Write-Host ""
-
-if ($appTable.Count -gt 0) {
-    Write-Host " Groesste Speicherverbraucher (Spitze):" -ForegroundColor White
-    $appTable | Select-Object -First 15 |
-        Format-Table Programm,
-            @{n='Spitze GB'; e={'{0:N2}' -f $_.SpitzeArbeitsGB}; a='right'},
-            @{n='Mittel GB'; e={'{0:N2}' -f $_.MittelArbeitsGB}; a='right'} -AutoSize
+Write-Host (" Rechner        : {0}" -f $selMachine)
+Write-Host (" Messtage/Laeufe: {0} Tag(e) / {1} Lauf(e)" -f $dayCount, $runs.Count)
+Write-Host (" Messpunkte     : {0}  (ueber rund {1})" -f $sampleCount, $spanText)
+Write-Host (" Verbauter RAM  : {0} GB" -f (Fmt $totalPhys))
+if ($ignoredMachines.Count -gt 0) {
+    Write-Host (" Hinweis        : Weitere Rechner im Ordner ignoriert: {0}" -f ($ignoredMachines -join ', ')) -ForegroundColor Yellow
 }
+Write-Host ""
+Write-Host " Bedarf (Commit / physisch, massgeblich der groessere Wert):" -ForegroundColor White
+Write-Host ("   Spitze (Max)  : {0,6} GB" -f (Fmt $needMax))
+Write-Host ("   Dauerbedarf p99: {0,5} GB" -f (Fmt $needP99))
+Write-Host ""
+foreach ($v in $verdicts) {
+    $col = switch ($v.Label) { 'Komfortabel' {'Green'} 'Ausreichend' {'Green'} 'Grenzwertig' {'Yellow'} default {'Red'} }
+    Write-Host ("   {0,3} GB -> {1,-12} (Auslastung {2}%)" -f $v.Size, $v.Label, [int]([math]::Round($v.Ratio*100))) -ForegroundColor $col
+}
+Write-Host ""
+Write-Host (" EMPFEHLUNG     : {0} GB" -f $recSize) -ForegroundColor Green
+if ($confLevel -eq 'gering') { Write-Host (" ! {0}" -f $confText) -ForegroundColor Red }
+Write-Host ""
 
-# ---------------------------------------------------------------------------
+# ===========================================================================
 # HTML-Bericht
-# ---------------------------------------------------------------------------
+# ===========================================================================
 if ([string]::IsNullOrWhiteSpace($OutputHtml)) {
     $OutputHtml = Join-Path $InputFolder ("Bericht_{0}.html" -f (Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'))
 }
 
-function HtmlEncode($s) {
-    return ([string]$s).Replace('&','&amp;').Replace('<','&lt;').Replace('>','&gt;')
+# --- Fragment: Konfidenz-Banner ---
+$confColor = switch ($confLevel) { 'gering' {'#dc2626'} 'mittel' {'#d97706'} default {'#16a34a'} }
+$confTitle = switch ($confLevel) { 'gering' {'Achtung - Messung zu kurz'} 'mittel' {'Hinweis zur Aussagekraft'} default {'Aussagekraft'} }
+$confidenceHtml = "<div class='banner' style='background:$confColor'><div class='banner-t'>$(HtmlEncode $confTitle)</div><div>$(HtmlEncode $confText)</div></div>"
+
+# --- Fragment: Verlaufs-Diagramm (Inline-SVG, Commit ueber die Zeit) ---
+$chartHtml = ""
+if ($sampleCount -ge 2) {
+    $W = 900; $H = 240; $padL = 48; $padR = 16; $padT = 14; $padB = 24
+    $vals = $committed.ToArray()
+    $yMax = [math]::Max($totalPhys, ($commitMax * 1.05))
+    if ($yMax -le 0) { $yMax = 16 }
+    $n = $vals.Count
+    $plotW = $W - $padL - $padR
+    $plotH = $H - $padT - $padB
+    $pts = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $n; $i++) {
+        $x = $padL + [int]([double]$i / [math]::Max(1, ($n - 1)) * $plotW)
+        $y = $padT + [int]((1 - ([double]$vals[$i] / $yMax)) * $plotH)
+        [void]$pts.Append("$x,$y ")
+    }
+    $areaPts = "$padL,$($padT + $plotH) " + $pts.ToString() + "$($padL + $plotW),$($padT + $plotH)"
+
+    # Referenzlinien 16/32/64 GB + verbauter RAM
+    $refHtml = ""
+    $refs = @(
+        @{ v = 16; c = '#16a34a'; t = '16 GB' },
+        @{ v = 32; c = '#d97706'; t = '32 GB' },
+        @{ v = 64; c = '#dc2626'; t = '64 GB' }
+    )
+    foreach ($rf in $refs) {
+        if ($rf.v -le $yMax) {
+            $ry = $padT + [int]((1 - ([double]$rf.v / $yMax)) * $plotH)
+            $refHtml += "<line x1='$padL' y1='$ry' x2='$($padL + $plotW)' y2='$ry' stroke='$($rf.c)' stroke-width='1' stroke-dasharray='5 4' opacity='.75'/>"
+            $refHtml += "<text x='6' y='$($ry + 4)' font-size='11' fill='$($rf.c)'>$($rf.t)</text>"
+        }
+    }
+    $chartHtml = @"
+<h2>Verlauf des Speicherbedarfs <span class="info" title="Die blaue Linie ist der zugesicherte Speicher ueber die Messzeit. Bleibt sie unter der 32-GB-Linie, reichen 32 GB; kratzt sie an einer Linie, wird diese Groesse knapp.">?</span></h2>
+<p class="muted">Blaue Linie = zugesicherter Speicher (Commit). Gestrichelt = die RAM-Groessen zum Vergleich. Alle Messtage sind aneinandergereiht.</p>
+<div class="tablewrap"><svg viewBox="0 0 $W $H" width="100%" preserveAspectRatio="xMidYMid meet" role="img" aria-label="Verlauf des zugesicherten Speichers">
+  <polygon points="$areaPts" fill="#3b82f6" opacity="0.12"/>
+  $refHtml
+  <polyline points="$($pts.ToString().Trim())" fill="none" stroke="#3b82f6" stroke-width="2"/>
+  <text x="6" y="12" font-size="11" fill="currentColor" opacity=".6">GB</text>
+</svg></div>
+"@
 }
 
-# Empfehlungsfarbe
-$recColor = switch ($recByP99) {
-    16 { '#16a34a' }
-    32 { '#2563eb' }
-    default { '#d97706' }
+# --- Fragment: Ampel-Tabelle der Groessen ---
+$sizeRowsHtml = ""
+foreach ($v in $verdicts) {
+    $pct = [int]([math]::Round($v.Ratio * 100))
+    $barPct = [math]::Min($pct, 100)
+    $isRec = ($v.Size -eq $recSize)
+    $star = if ($isRec) { " &#9733;" } else { "" }
+    $sizeRowsHtml += @"
+<tr$(if($isRec){" class='rec-row'"})>
+  <td class='sz'>$($v.Size) GB$star</td>
+  <td class='barcell'><div class='bar'><div class='barfill' style='width:$barPct%;background:$($v.Color)'></div></div></td>
+  <td class='pct'>$pct&nbsp;%</td>
+  <td><span class='pill' style='background:$($v.Color)'>$($v.Label)</span></td>
+</tr>
+"@
 }
 
+# --- Fragment: Aufschluesselung pro Messtag/Lauf ---
+$runRowsHtml = ""
+foreach ($r in ($runs | Sort-Object Start)) {
+    $rc = @($r.Rows | ForEach-Object { ConvertTo-Double $_.CommittedGB })
+    $rMax = Stat-Max $rc
+    $rP99 = Get-Percentile -Data $rc -Percentile 99
+    $zeit = if ($r.Start -and $r.End) { "{0} - {1}" -f $r.Start.ToString('dd.MM. HH:mm'), $r.End.ToString('HH:mm') } else { "?" }
+    $dur  = if ($r.Start -and $r.End) { [int]($r.End - $r.Start).TotalMinutes } else { 0 }
+    $runRowsHtml += "<tr><td>$(HtmlEncode $zeit)</td><td class='num'>$($r.Samples)</td><td class='num'>$dur min</td><td class='num'>$(Fmt $rMax) GB</td><td class='num'>$(Fmt $rP99) GB</td></tr>`n"
+}
+
+# --- Fragment: Top-Verbraucher ---
 $appRowsHtml = ""
 foreach ($a in $appTable) {
-    $appRowsHtml += ("<tr><td>{0}</td><td class='num'>{1:N2}</td><td class='num'>{2:N2}</td><td class='num'>{3:N2}</td></tr>`n" -f `
-        (HtmlEncode $a.Programm), $a.SpitzeArbeitsGB, $a.MittelArbeitsGB, $a.SpitzePrivatGB)
+    $appRowsHtml += "<tr><td>$(HtmlEncode $a.Programm)</td><td class='num'>$(Fmt $a.SpitzePrivatGB)</td><td class='num'>$(Fmt $a.MittelPrivatGB)</td><td class='num'>$(Fmt $a.SpitzeArbeitsGB)</td></tr>`n"
+}
+
+# --- Fragment: Hoechststand-Snapshot ---
+$peakHtml = ""
+if ($peakProc.Count -gt 0) {
+    $peakRows = ""
+    foreach ($p in $peakProc) {
+        $peakRows += "<tr><td>$(HtmlEncode $p.Programm)</td><td class='num'>$(Fmt $p.PrivatGB)</td><td class='num'>$(Fmt $p.ArbeitsGB)</td></tr>`n"
+    }
+    $peakHtml = @"
+<h2>Was lief beim Hoechststand?</h2>
+<p class='muted'>Groesster gemessener Bedarf am <b>$(HtmlEncode $peakTs)</b> mit <b>$(Fmt $peakCommit) GB</b> zugesichertem Speicher. Diese Programme waren dann offen (nach privatem Speicher sortiert):</p>
+<div class='tablewrap'><table>
+<thead><tr><th>Programm</th><th class='num'>Privat (GB)</th><th class='num'>Arbeitsspeicher (GB)</th></tr></thead>
+<tbody>
+$peakRows
+</tbody></table></div>
+"@
+}
+
+$ignoredHtml = ""
+if ($ignoredMachines.Count -gt 0) {
+    $ignoredHtml = "<p class='muted'>Hinweis: Der Ordner enthaelt auch Messungen anderer Rechner ($(HtmlEncode ($ignoredMachines -join ', '))). Dieser Bericht wertet nur <b>$(HtmlEncode $selMachine)</b> aus. Fuer die anderen Rechner mit <code>-Machine NAME</code> eigene Berichte erstellen.</p>"
 }
 
 $html = @"
@@ -242,63 +462,126 @@ $html = @"
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>RAM-Bedarfsanalyse $(HtmlEncode $env:COMPUTERNAME)</title>
+<title>RAM-Bedarfsanalyse $(HtmlEncode $selMachine)</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: Segoe UI, system-ui, sans-serif; margin: 0; padding: 2rem;
-         background: #f8fafc; color: #0f172a; }
-  @media (prefers-color-scheme: dark) { body { background:#0f172a; color:#e2e8f0; } .card{background:#1e293b!important;} th{background:#334155!important;} }
-  h1 { font-size: 1.5rem; margin: 0 0 .25rem; }
-  .sub { color: #64748b; margin-bottom: 1.5rem; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(160px,1fr)); gap: 1rem; margin-bottom: 1.5rem; }
-  .card { background: #fff; border-radius: 12px; padding: 1rem 1.25rem; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-  .card .label { font-size: .8rem; color: #64748b; text-transform: uppercase; letter-spacing: .03em; }
-  .card .value { font-size: 1.6rem; font-weight: 700; margin-top: .25rem; }
-  .rec { background: $recColor; color: #fff; border-radius: 12px; padding: 1.5rem; margin-bottom: 1.5rem; }
-  .rec .big { font-size: 2.2rem; font-weight: 800; }
-  table { border-collapse: collapse; width: 100%; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
-  th, td { padding: .55rem .8rem; text-align: left; border-bottom: 1px solid #e2e8f0; }
-  th { background: #f1f5f9; font-size: .85rem; }
-  td.num { text-align: right; font-variant-numeric: tabular-nums; }
-  .note { font-size: .9rem; color: #475569; margin-top: .5rem; }
-  footer { margin-top: 2rem; font-size: .8rem; color: #94a3b8; }
+  :root { --bg:#f4f6fb; --fg:#0f172a; --muted:#64748b; --card:#ffffff; --line:#e2e8f0; --th:#f1f5f9; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#0b1220; --fg:#e2e8f0; --muted:#94a3b8; --card:#1e293b; --line:#334155; --th:#334155; } }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", system-ui, sans-serif; margin:0; padding:2rem 1.5rem; background:var(--bg); color:var(--fg); line-height:1.5; }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  h1 { font-size:1.6rem; margin:0 0 .2rem; }
+  h2 { font-size:1.2rem; margin:2rem 0 .6rem; }
+  .sub { color:var(--muted); margin-bottom:1.4rem; font-size:.95rem; }
+  .muted { color:var(--muted); font-size:.92rem; }
+  .banner { color:#fff; border-radius:12px; padding:1rem 1.2rem; margin-bottom:1.2rem; }
+  .banner-t { font-weight:700; margin-bottom:.2rem; }
+  .rec { border-radius:14px; padding:1.4rem 1.5rem; margin-bottom:1.4rem; color:#fff; background:$recColor; }
+  .rec .k { font-size:.8rem; text-transform:uppercase; letter-spacing:.04em; opacity:.9; }
+  .rec .v { font-size:2.6rem; font-weight:800; line-height:1.1; margin:.1rem 0 .4rem; }
+  .rec .p { font-size:1rem; opacity:.97; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:1rem 1.2rem; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:.8rem; margin:.4rem 0 0; }
+  .tile .lbl { font-size:.72rem; text-transform:uppercase; letter-spacing:.03em; color:var(--muted); display:flex; align-items:center; gap:.3rem; }
+  .tile .val { font-size:1.5rem; font-weight:700; margin-top:.15rem; }
+  .tile .hint { font-size:.78rem; color:var(--muted); margin-top:.25rem; }
+  table { border-collapse:collapse; width:100%; background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  .tablewrap { overflow-x:auto; }
+  th,td { padding:.55rem .8rem; text-align:left; border-bottom:1px solid var(--line); font-size:.92rem; }
+  th { background:var(--th); }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  .sizetable td { vertical-align:middle; }
+  .sz { font-weight:700; white-space:nowrap; }
+  .rec-row { outline:2px solid $recColor; }
+  .bar { background:var(--line); border-radius:6px; height:14px; width:100%; min-width:120px; overflow:hidden; }
+  .barfill { height:100%; }
+  .pct { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .pill { color:#fff; padding:.15rem .6rem; border-radius:999px; font-size:.8rem; font-weight:600; white-space:nowrap; }
+  .info { display:inline-flex; align-items:center; justify-content:center; width:15px; height:15px; border-radius:50%; background:var(--muted); color:var(--card); font-size:.7rem; font-weight:700; cursor:help; }
+  details { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:.6rem 1rem; margin:.5rem 0; }
+  summary { cursor:pointer; font-weight:600; }
+  .gloss { margin:.6rem 0; padding:.6rem .2rem; border-bottom:1px dashed var(--line); }
+  .gloss:last-child { border-bottom:0; }
+  .gloss b { display:block; }
+  .good { color:#16a34a; } .warn { color:#d97706; } .bad { color:#dc2626; }
+  footer { margin-top:2rem; font-size:.8rem; color:var(--muted); }
 </style>
 </head>
 <body>
+<div class="wrap">
+
   <h1>Arbeitsspeicher-Bedarfsanalyse</h1>
-  <div class="sub">Rechner <b>$(HtmlEncode $env:COMPUTERNAME)</b> &middot; $(HtmlEncode $firstTs) bis $(HtmlEncode $lastTs) &middot; $sampleCount Messpunkte &middot; verbauter RAM: $totalPhys GB</div>
+  <div class="sub">Rechner <b>$(HtmlEncode $selMachine)</b> &middot; $dayCount Messtag(e), $($runs.Count) Lauf(e), $sampleCount Messpunkte &middot; verbauter RAM: $(Fmt $totalPhys) GB</div>
+
+  $confidenceHtml
 
   <div class="rec">
-    <div class="label" style="opacity:.85">Empfehlung</div>
-    <div class="big">$verdict</div>
-    <div class="note" style="color:#f8fafc;opacity:.95">$(HtmlEncode $pagingNote)</div>
+    <div class="k">Empfehlung</div>
+    <div class="v">$recSize GB</div>
+    <div class="p">$(HtmlEncode $plain)</div>
   </div>
 
+  <h2>Reicht welche Groesse? <span class="info" title="Auslastung = benoetigter Speicher geteilt durch die Groesse. Unter 75% = viel Reserve, bis 90% = ok, bis ca. 100% = knapp, darueber = zu klein.">?</span></h2>
+  <p class="muted">Bewertet anhand des <b>Dauerbedarfs (p99)</b> von <b>$(Fmt $needP99) GB</b>. Gruen = komfortabel, Gelb/Orange = knapp, Rot = zu klein. &#9733; = Empfehlung.</p>
+  <div class="tablewrap"><table class="sizetable">
+    <thead><tr><th>Groesse</th><th>Auslastung</th><th class="num">%</th><th>Bewertung</th></tr></thead>
+    <tbody>
+$sizeRowsHtml
+    </tbody>
+  </table></div>
+
+  $chartHtml
+
+  <h2>Die wichtigsten Zahlen</h2>
   <div class="grid">
-    <div class="card"><div class="label">Commit &ndash; Maximum</div><div class="value">$commitMax GB</div></div>
-    <div class="card"><div class="label">Commit &ndash; p99</div><div class="value">$commitP99 GB</div></div>
-    <div class="card"><div class="label">Commit &ndash; p95</div><div class="value">$commitP95 GB</div></div>
-    <div class="card"><div class="label">Commit &ndash; Median</div><div class="value">$commitP50 GB</div></div>
-    <div class="card"><div class="label">Physisch belegt (max)</div><div class="value">$physMax GB</div></div>
-    <div class="card"><div class="label">Minimal frei</div><div class="value">$availMin GB</div></div>
-    <div class="card"><div class="label">Auslagerung (max)</div><div class="value">$pageMax /s</div></div>
+    <div class="card tile"><div class="lbl">Bedarf Dauer (p99) <span class="info" title="Der Wert, den 99% aller Messungen nicht ueberschritten haben - der praktische Spitzenbedarf ohne einzelne Ausreisser. Das ist die wichtigste Zahl fuer die Beschaffung.">?</span></div><div class="val">$(Fmt $needP99) GB</div><div class="hint">massgeblich fuer die Empfehlung</div></div>
+    <div class="card tile"><div class="lbl">Bedarf Spitze (Max) <span class="info" title="Der hoechste einzelne Messwert. Zeigt den absoluten Worst-Case, kann ein kurzer Ausreisser sein.">?</span></div><div class="val">$(Fmt $needMax) GB</div><div class="hint">hoechster Einzelwert</div></div>
+    <div class="card tile"><div class="lbl">Commit p99 <span class="info" title="Zugesicherter Speicher: die Menge, die alle Programme zusammen angefordert haben. Unabhaengig vom verbauten RAM.">?</span></div><div class="val">$(Fmt $commitP99) GB</div><div class="hint">angeforderter Speicher</div></div>
+    <div class="card tile"><div class="lbl">Physisch genutzt <span class="info" title="Tatsaechlich mit Daten belegter RAM ohne den Datei-Cache. Gegenprobe zum Commit-Wert.">?</span></div><div class="val">$(Fmt $physNetMax) GB</div><div class="hint">real belegt, ohne Cache</div></div>
+    <div class="card tile"><div class="lbl">Minimal frei <span class="info" title="Wenigster freier Arbeitsspeicher waehrend der Messung. Faellt dieser Wert nahe 0, wird es eng.">?</span></div><div class="val">$(Fmt $availMin) GB</div><div class="hint">$(if($availMin -lt $lowAvailGB){"<span class='bad'>knapp</span>"}else{"<span class='good'>genug Reserve</span>"})</div></div>
+    <div class="card tile"><div class="lbl">Speicherdruck <span class="info" title="Anzahl Messpunkte, in denen Windows Daten von der Platte nachladen musste UND gleichzeitig wenig RAM frei war. 0 ist gut.">?</span></div><div class="val">$pressureSamples</div><div class="hint">$(if($pressureSamples -gt 0){"<span class='bad'>Engpaesse!</span>"}else{"<span class='good'>keine Engpaesse</span>"})</div></div>
   </div>
+  <p class="muted" style="margin-top:.8rem">$(HtmlEncode $pagingNote)</p>
 
-  <p class="note"><b>Lesehilfe:</b> Massgeblich ist der <b>zugesicherte Speicher (Commit Charge)</b> &ndash; die Menge, die alle Programme zusammen angefordert haben. Sie ist unabhaengig vom verbauten RAM und damit die belastbare Groesse fuer die Beschaffung. Eine Speichergroesse gilt als komfortabel, wenn der Bedarf rund 80&nbsp;% davon nicht ueberschreitet (Rest = Reserve fuer Spitzen und Datei-Cache).</p>
+  <h2>Pro Messtag / Lauf</h2>
+  <p class="muted">So verteilt sich der Bedarf auf die einzelnen Messungen. Alle fliessen gemeinsam in die Empfehlung oben ein.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Zeitraum</th><th class="num">Messpunkte</th><th class="num">Dauer</th><th class="num">Commit Spitze</th><th class="num">Commit p99</th></tr></thead>
+    <tbody>
+$runRowsHtml
+    </tbody>
+  </table></div>
+  $ignoredHtml
 
-  <h2 style="font-size:1.2rem;margin-top:1.5rem">Groesste Speicherverbraucher</h2>
-  <table>
-    <thead><tr><th>Programm</th><th class="num">Spitze Arbeitsspeicher (GB)</th><th class="num">Mittel (GB)</th><th class="num">Spitze privat (GB)</th></tr></thead>
+  $peakHtml
+
+  <h2>Groesste Speicherverbraucher</h2>
+  <p class="muted">Sortiert nach <b>privatem Speicher</b> - das ist der Speicher, den nur dieses Programm braucht (aussagekraeftiger als der Arbeitsspeicher-Wert, weil gemeinsame Windows-Bausteine dort mehrfach zaehlen).</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Programm</th><th class="num">Spitze privat (GB)</th><th class="num">Mittel privat (GB)</th><th class="num">Spitze Arbeitsspeicher (GB)</th></tr></thead>
     <tbody>
 $appRowsHtml
     </tbody>
-  </table>
+  </table></div>
 
-  <footer>Erstellt am $(Get-Date -Format 'dd.MM.yyyy HH:mm') mit Track-Memory.ps1 / Analyze-Memory.ps1</footer>
+  <h2>Was bedeuten die Zahlen? (Erklaerung fuer alle)</h2>
+  <details open>
+    <summary>Begriffe einfach erklaert</summary>
+    <div class="gloss"><b>Zugesicherter Speicher (Commit Charge)</b>Die Menge Arbeitsspeicher, die alle Programme zusammen bei Windows angefordert haben. <i>Warum wichtig:</i> Das ist der echte Bedarf und haengt NICHT davon ab, wie viel RAM eingebaut ist - deshalb die beste Grundlage fuer die Kaufentscheidung. <i>Guter Wert:</i> deutlich unter der geplanten RAM-Groesse.</div>
+    <div class="gloss"><b>Arbeitsspeicher (Working Set)</b>Der RAM, den ein Programm gerade wirklich benutzt. <i>Achtung:</i> Gemeinsame Windows-Bausteine werden bei jedem Programm mitgezaehlt - die Summe ueber alle Programme ist deshalb zu hoch. Fuer den Vergleich einzelner Programme daher lieber der private Speicher.</div>
+    <div class="gloss"><b>Privater Speicher</b>Der Speicher, den nur dieses eine Programm belegt (ohne geteilte Bausteine). <i>Warum wichtig:</i> zeigt fair, welches Programm der groesste Speicherfresser ist.</div>
+    <div class="gloss"><b>Verfuegbar / frei</b>Wie viel RAM gerade noch frei ist. <i>Guter Wert:</i> immer ein paar GB uebrig. <i>Schlechter Wert:</i> nahe 0 - dann muss Windows auslagern und alles wird langsam.</div>
+    <div class="gloss"><b>Datei-Cache</b>Freien RAM nutzt Windows automatisch als Zwischenspeicher, um z. B. grosse CAD-Plaene schneller zu oeffnen. Das laesst "belegt" hoch aussehen, ist aber Reserve, die sofort freigegeben wird - deshalb rechnen wir den Cache heraus.</div>
+    <div class="gloss"><b>Auslagerung / Speicherdruck</b>Reicht der RAM nicht, schiebt Windows Daten auf die Festplatte (Auslagerungsdatei) - das bremst spuerbar. Wir zaehlen es nur als Problem, wenn gleichzeitig wenig RAM frei war. <i>Guter Wert:</i> 0.</div>
+    <div class="gloss"><b>p99 / p95 / Median (Perzentil)</b>Sortiert man alle Messwerte, ist p99 der Wert, den 99% der Messungen nicht ueberschreiten (der Median 50%). <i>Warum wichtig:</i> p99 zeigt den praktischen Spitzenbedarf, ohne dass ein einzelner kurzer Ausreisser die Entscheidung bestimmt.</div>
+    <div class="gloss"><b>Auslastung (%)</b>Benoetigter Speicher geteilt durch die RAM-Groesse. <i>Faustregel:</i> <span class="good">bis 75% komfortabel</span>, <span class="warn">bis ~100% knapp</span>, <span class="bad">darueber zu klein</span>. Etwas Reserve ist gut fuer den Datei-Cache und kuenftig groessere Programme.</div>
+  </details>
+
+  <footer>Erstellt am $(Get-Date -Format 'dd.MM.yyyy HH:mm') &middot; RAM-Monitor (Track-Memory.ps1 / Analyze-Memory.ps1)</footer>
+</div>
 </body>
 </html>
 "@
 
 $html | Out-File -FilePath $OutputHtml -Encoding UTF8
-Write-Host (" HTML-Bericht    : {0}" -f $OutputHtml) -ForegroundColor Green
+Write-Host (" HTML-Bericht   : {0}" -f $OutputHtml) -ForegroundColor Green
 Write-Host "===================================================================" -ForegroundColor Cyan
